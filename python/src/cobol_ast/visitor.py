@@ -11,6 +11,9 @@ This module implements the Visitor for:
 - DATA DIVISION → extracts WORKING-STORAGE and LINKAGE SECTION data items,
   including PIC clauses, USAGE types, VALUE literals, REDEFINES, and the
   level-number hierarchy (e.g., level-05 items nested under level-01 groups).
+- PROCEDURE DIVISION → extracts paragraphs and statements (DISPLAY, MOVE, ADD,
+  CALL, IF/ELSE/END-IF, STOP RUN, GOBACK, EXEC SQL), plus the optional
+  USING clause for called subprograms.
 
 The Visitor pattern works by overriding ``visit*`` methods from the generated
 ``Cobol85Visitor`` base class. Each override receives the corresponding CST context
@@ -37,13 +40,24 @@ from __future__ import annotations
 import re
 
 from cobol_ast.ast_nodes import (
+    AddNode,
+    CallNode,
     DataDivisionNode,
     DataItemNode,
+    DisplayNode,
     EnvironmentDivisionNode,
+    ExecSqlNode,
+    GobackNode,
     IdentificationDivisionNode,
+    IfNode,
     LinkageSectionNode,
+    MoveNode,
+    ParagraphNode,
     PicClause,
+    ProcedureDivisionNode,
     ProgramNode,
+    StatementNode,
+    StopRunNode,
     UsageType,
     WorkingStorageSectionNode,
 )
@@ -64,6 +78,9 @@ class CobolAstVisitor(Cobol85Visitor):
     - ENVIRONMENT DIVISION → produces an EnvironmentDivisionNode marker
     - DATA DIVISION → extracts WORKING-STORAGE and LINKAGE SECTION data items
       with PIC clauses, USAGE types, VALUE literals, REDEFINES, and hierarchy
+    - PROCEDURE DIVISION → extracts paragraphs and statements (DISPLAY, MOVE,
+      ADD, CALL, IF/ELSE/END-IF, STOP RUN, GOBACK, EXEC SQL), plus the
+      optional USING clause for called subprograms
     """
 
     def visitStartRule(self, ctx: Cobol85Parser.StartRuleContext) -> ProgramNode | None:
@@ -104,7 +121,7 @@ class CobolAstVisitor(Cobol85Visitor):
         - ``identificationDivision`` (mandatory) — provides PROGRAM-ID
         - ``environmentDivision`` (optional)
         - ``dataDivision`` (optional) — variable declarations
-        - ``procedureDivision`` (optional, handled in later steps)
+        - ``procedureDivision`` (optional) — executable statements
 
         Returns:
             A ``ProgramNode`` with the extracted program ID and division nodes.
@@ -120,11 +137,16 @@ class CobolAstVisitor(Cobol85Visitor):
         data_ctx = ctx.dataDivision()
         data_node = self.visitDataDivision(data_ctx) if data_ctx else None
 
+        # PROCEDURE DIVISION is optional — contains executable statements.
+        proc_ctx = ctx.procedureDivision()
+        proc_node = self.visitProcedureDivision(proc_ctx) if proc_ctx else None
+
         return ProgramNode(
             program_id=id_node.program_id,
             identification=id_node,
             environment=env_node,
             data=data_node,
+            procedure=proc_node,
         )
 
     def visitIdentificationDivision(
@@ -431,10 +453,382 @@ class CobolAstVisitor(Cobol85Visitor):
             return raw[1:-1]
         return raw
 
+    # -------------------------------------------------------------------
+    # PROCEDURE DIVISION
+    # -------------------------------------------------------------------
+
+    def visitProcedureDivision(
+        self, ctx: Cobol85Parser.ProcedureDivisionContext
+    ) -> ProcedureDivisionNode:
+        """Visit the PROCEDURE DIVISION to extract paragraphs and the USING clause.
+
+        The grammar structure is:
+            procedureDivision
+              → PROCEDURE DIVISION procedureDivisionUsingClause?
+                procedureDivisionGivingClause? DOT_FS
+                procedureDeclaratives? procedureDivisionBody
+
+        The USING clause lists parameters for called subprograms (matching
+        LINKAGE SECTION items). The body contains paragraphs with statements.
+
+        Returns:
+            A ``ProcedureDivisionNode`` with USING items and paragraphs.
+        """
+        # Extract USING clause parameters (if present).
+        using_items: list[str] = []
+        using_ctx = ctx.procedureDivisionUsingClause()
+        if using_ctx:
+            using_items = self._extract_proc_using_items(using_ctx)
+
+        # Extract paragraphs from the division body.
+        paragraphs: list[ParagraphNode] = []
+        body_ctx = ctx.procedureDivisionBody()
+        if body_ctx:
+            paragraphs_ctx = body_ctx.paragraphs()
+            if paragraphs_ctx:
+                for para_ctx in paragraphs_ctx.paragraph():
+                    para = self._visit_paragraph(para_ctx)
+                    paragraphs.append(para)
+
+        return ProcedureDivisionNode(
+            using_items=tuple(using_items),
+            paragraphs=tuple(paragraphs),
+        )
+
+    def _extract_proc_using_items(
+        self, ctx: Cobol85Parser.ProcedureDivisionUsingClauseContext
+    ) -> list[str]:
+        """Extract parameter names from the PROCEDURE DIVISION USING clause.
+
+        The grammar structure is:
+            procedureDivisionUsingClause
+              → (USING | CHAINING) procedureDivisionUsingParameter+
+
+        Each parameter is passed BY REFERENCE (default) or BY VALUE.
+        We extract the identifier name from each parameter.
+
+        Args:
+            ctx: The USING clause context.
+
+        Returns:
+            A list of parameter names (e.g., ``['LS-ORDER-ID', 'LS-QUANTITY']``).
+        """
+        items: list[str] = []
+        for param in ctx.procedureDivisionUsingParameter():
+            # Parameters passed by reference (the default in COBOL).
+            by_ref = param.procedureDivisionByReferencePhrase()
+            if by_ref:
+                for ref in by_ref.procedureDivisionByReference():
+                    ident = ref.identifier()
+                    if ident:
+                        items.append(ident.getText())
+            # Parameters passed by value (uncommon, but supported).
+            by_val = param.procedureDivisionByValuePhrase()
+            if by_val:
+                for val in by_val.procedureDivisionByValue():
+                    ident = val.identifier()
+                    if ident:
+                        items.append(ident.getText())
+        return items
+
+    def _visit_paragraph(self, ctx: Cobol85Parser.ParagraphContext) -> ParagraphNode:
+        """Visit a named paragraph and collect its statements.
+
+        The grammar structure is:
+            paragraph → paragraphName DOT_FS (alteredGoTo | sentence*)
+
+        A paragraph is a labeled block of statements. Sentences within the
+        paragraph contain one or more statements terminated by a period.
+
+        Args:
+            ctx: A ``ParagraphContext`` from the parser.
+
+        Returns:
+            A ``ParagraphNode`` with the paragraph name and its statements.
+        """
+        name = ctx.paragraphName().getText()
+        statements: list[StatementNode] = []
+        for sentence_ctx in ctx.sentence():
+            for stmt_ctx in sentence_ctx.statement():
+                stmt = self._visit_statement(stmt_ctx)
+                if stmt is not None:
+                    statements.append(stmt)
+        return ParagraphNode(name=name, statements=statements)
+
+    def _visit_statement(
+        self, ctx: Cobol85Parser.StatementContext
+    ) -> StatementNode | None:
+        """Dispatch a statement context to the appropriate handler.
+
+        The grammar's ``statement`` rule is a union of all statement types.
+        We check which alternative matched and delegate to the corresponding
+        visitor method. Unhandled statement types return ``None``.
+
+        Args:
+            ctx: A ``StatementContext`` from the parser.
+
+        Returns:
+            A typed statement AST node, or ``None`` for unhandled types.
+        """
+        if ctx.displayStatement():
+            return self._visit_display(ctx.displayStatement())
+        if ctx.moveStatement():
+            return self._visit_move(ctx.moveStatement())
+        if ctx.addStatement():
+            return self._visit_add(ctx.addStatement())
+        if ctx.callStatement():
+            return self._visit_call(ctx.callStatement())
+        if ctx.ifStatement():
+            return self._visit_if(ctx.ifStatement())
+        if ctx.stopStatement():
+            return self._visit_stop(ctx.stopStatement())
+        if ctx.gobackStatement():
+            return GobackNode()
+        if ctx.execSqlStatement():
+            return self._visit_exec_sql(ctx.execSqlStatement())
+        return None
+
+    def _visit_display(self, ctx: Cobol85Parser.DisplayStatementContext) -> DisplayNode:
+        """Extract operands from a DISPLAY statement.
+
+        DISPLAY outputs one or more operands to the console. Each operand
+        can be a string literal (``"Hello"``) or a data name (``WS-FIELD``).
+
+        The grammar structure is:
+            displayStatement → DISPLAY displayOperand+ displayAt? displayUpon?
+                               displayWith?
+
+        Args:
+            ctx: A ``DisplayStatementContext`` from the parser.
+
+        Returns:
+            A ``DisplayNode`` with the list of operand texts.
+        """
+        operands: list[str] = []
+        for op_ctx in ctx.displayOperand():
+            operands.append(op_ctx.getText())
+        return DisplayNode(operands=operands)
+
+    def _visit_move(self, ctx: Cobol85Parser.MoveStatementContext) -> MoveNode:
+        """Extract source and targets from a MOVE statement.
+
+        MOVE is COBOL's assignment: ``MOVE source TO target1 target2 ...``
+        The source can be a literal, data name, or figurative constant
+        (e.g., ZEROS, SPACES).
+
+        The grammar structure is:
+            moveStatement → MOVE ALL? (moveToStatement |
+                            moveCorrespondingToStatement)
+            moveToStatement → moveToSendingArea TO identifier+
+
+        Args:
+            ctx: A ``MoveStatementContext`` from the parser.
+
+        Returns:
+            A ``MoveNode`` with the source value and target names.
+        """
+        move_to = ctx.moveToStatement()
+        if move_to:
+            source = move_to.moveToSendingArea().getText()
+            targets = [ident.getText() for ident in move_to.identifier()]
+            return MoveNode(source=source, targets=targets)
+        # MOVE CORRESPONDING is not used in the sample files.
+        return MoveNode(source=ctx.getText(), targets=[])
+
+    def _visit_add(self, ctx: Cobol85Parser.AddStatementContext) -> AddNode:
+        """Extract value and target from an ADD statement.
+
+        The grammar structure is:
+            addStatement → ADD (addToStatement | addToGivingStatement |
+                           addCorrespondingStatement) ...
+            addToStatement → addFrom+ TO addTo+
+
+        Args:
+            ctx: An ``AddStatementContext`` from the parser.
+
+        Returns:
+            An ``AddNode`` with the value being added and the target variable.
+        """
+        add_to = ctx.addToStatement()
+        if add_to:
+            # addFrom is the value being added (a literal or identifier).
+            value = add_to.addFrom(0).getText()
+            # addTo is the target variable receiving the sum.
+            target = add_to.addTo(0).identifier().getText()
+            return AddNode(value=value, target=target)
+        # ADD GIVING and ADD CORRESPONDING are not used in the samples.
+        return AddNode(value=ctx.getText(), target="")
+
+    def _visit_call(self, ctx: Cobol85Parser.CallStatementContext) -> CallNode:
+        """Extract program name and USING items from a CALL statement.
+
+        CALL invokes a subprogram: ``CALL "PROG" USING param1 param2 ...``
+
+        The grammar structure is:
+            callStatement → CALL (identifier | literal) callUsingPhrase? ...
+            callUsingPhrase → USING callUsingParameter+
+
+        Args:
+            ctx: A ``CallStatementContext`` from the parser.
+
+        Returns:
+            A ``CallNode`` with the called program name and parameter list.
+        """
+        # The program name is a literal (quoted string) or an identifier.
+        literal_ctx = ctx.literal()
+        if literal_ctx:
+            raw = literal_ctx.getText()
+            # Strip surrounding quotes from the program name.
+            if (raw.startswith('"') and raw.endswith('"')) or (
+                raw.startswith("'") and raw.endswith("'")
+            ):
+                program_name = raw[1:-1]
+            else:
+                program_name = raw
+        else:
+            program_name = ctx.identifier().getText()
+
+        # Extract USING parameters — typically passed by reference.
+        using_items: list[str] = []
+        using_ctx = ctx.callUsingPhrase()
+        if using_ctx:
+            for param in using_ctx.callUsingParameter():
+                by_ref = param.callByReferencePhrase()
+                if by_ref:
+                    for ref in by_ref.callByReference():
+                        ident = ref.identifier()
+                        if ident:
+                            using_items.append(ident.getText())
+
+        return CallNode(program_name=program_name, using_items=using_items)
+
+    def _visit_if(self, ctx: Cobol85Parser.IfStatementContext) -> IfNode:
+        """Extract condition and branches from an IF/ELSE/END-IF statement.
+
+        The grammar structure is:
+            ifStatement → IF condition ifThen ifElse? END_IF?
+            ifThen → THEN? (NEXT SENTENCE | statement*)
+            ifElse → ELSE (NEXT SENTENCE | statement*)
+
+        The condition text is extracted from the original source with whitespace
+        preserved, rather than using ``getText()`` which concatenates tokens
+        without spaces (e.g., ``SQLCODE=0`` instead of ``SQLCODE = 0``).
+
+        The then- and else-branches are visited recursively to collect nested
+        statements (which may themselves be IF statements).
+
+        Args:
+            ctx: An ``IfStatementContext`` from the parser.
+
+        Returns:
+            An ``IfNode`` with the condition text and both branch statement lists.
+        """
+        condition = _get_original_text(ctx.condition())
+
+        then_stmts: list[StatementNode] = []
+        then_ctx = ctx.ifThen()
+        if then_ctx:
+            for stmt_ctx in then_ctx.statement():
+                stmt = self._visit_statement(stmt_ctx)
+                if stmt is not None:
+                    then_stmts.append(stmt)
+
+        else_stmts: list[StatementNode] = []
+        else_ctx = ctx.ifElse()
+        if else_ctx:
+            for stmt_ctx in else_ctx.statement():
+                stmt = self._visit_statement(stmt_ctx)
+                if stmt is not None:
+                    else_stmts.append(stmt)
+
+        return IfNode(
+            condition=condition,
+            then_statements=then_stmts,
+            else_statements=else_stmts,
+        )
+
+    def _visit_stop(
+        self, ctx: Cobol85Parser.StopStatementContext
+    ) -> StopRunNode | None:
+        """Handle a STOP statement.
+
+        The grammar structure is:
+            stopStatement → STOP (RUN | literal)
+
+        Only ``STOP RUN`` produces a ``StopRunNode``. ``STOP literal``
+        (which pauses execution with a message) is not modelled.
+
+        Args:
+            ctx: A ``StopStatementContext`` from the parser.
+
+        Returns:
+            A ``StopRunNode`` for STOP RUN, or ``None`` for other forms.
+        """
+        if ctx.RUN():
+            return StopRunNode()
+        return None
+
+    def _visit_exec_sql(
+        self, ctx: Cobol85Parser.ExecSqlStatementContext
+    ) -> ExecSqlNode:
+        """Extract the SQL text from an EXEC SQL ... END-EXEC block.
+
+        The preprocessor tags each line of an EXEC SQL block with the
+        ``*>EXECSQL`` prefix, and the grammar matches these tagged lines
+        as ``EXECSQLLINE`` tokens:
+            execSqlStatement → EXECSQLLINE+
+
+        We strip the tags, remove the ``EXEC SQL`` and ``END-EXEC``
+        markers, and return the inner SQL content as raw text.
+        The SQL is not parsed — it is preserved verbatim.
+
+        Args:
+            ctx: An ``ExecSqlStatementContext`` from the parser.
+
+        Returns:
+            An ``ExecSqlNode`` containing the raw SQL text.
+        """
+        lines: list[str] = []
+        for token in ctx.EXECSQLLINE():
+            text = token.getText()
+            # Strip the *>EXECSQL tag that the preprocessor added.
+            text = text.replace("*>EXECSQL", "", 1)
+            text = text.strip()
+            if text:
+                lines.append(text)
+        full_text = " ".join(lines)
+        # Remove the EXEC SQL opening marker.
+        full_text = re.sub(r"^EXEC\s+SQL\s*", "", full_text, flags=re.IGNORECASE)
+        # Remove the END-EXEC closing marker (with optional trailing period).
+        full_text = re.sub(r"\s*END-EXEC\.?\s*$", "", full_text, flags=re.IGNORECASE)
+        return ExecSqlNode(sql_text=full_text.strip())
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _get_original_text(ctx) -> str:
+    """Get the original text of a parse tree context with whitespace preserved.
+
+    ``ParserRuleContext.getText()`` concatenates all token texts without
+    spaces, producing output like ``SQLCODE=0`` instead of ``SQLCODE = 0``.
+    This function reads directly from the character input stream to preserve
+    the original whitespace between tokens.
+
+    Args:
+        ctx: An ANTLR4 ``ParserRuleContext`` with ``start`` and ``stop`` tokens.
+
+    Returns:
+        The original source text spanning the context, with whitespace intact.
+    """
+    # Token.source is a tuple (TokenSource, InputStream).  source[1] is the
+    # CharStream (InputStream) that the Lexer read from — i.e. the preprocessed
+    # COBOL text.  Token.start / Token.stop are character-position indices into
+    # that stream.
+    input_stream = ctx.start.source[1]
+    return input_stream.getText(ctx.start.start, ctx.stop.stop)
 
 
 def _parse_pic_string(raw: str) -> PicClause:

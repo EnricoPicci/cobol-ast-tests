@@ -8,12 +8,22 @@ Covers:
 - ENVIRONMENT DIVISION — presence detection
 - DATA DIVISION — WORKING-STORAGE and LINKAGE SECTION data items with PIC
   clauses, USAGE types, VALUE literals, REDEFINES, and level-number hierarchy
+- PROCEDURE DIVISION — statements (DISPLAY, MOVE, ADD, CALL, IF/ELSE/END-IF,
+  STOP RUN, GOBACK, EXEC SQL) and the optional USING clause
 """
 
 from cobol_ast.ast_nodes import (
+    AddNode,
+    CallNode,
+    DisplayNode,
     EnvironmentDivisionNode,
+    ExecSqlNode,
+    GobackNode,
     IdentificationDivisionNode,
+    IfNode,
+    MoveNode,
     ProgramNode,
+    StopRunNode,
     UsageType,
 )
 from cobol_ast.parser import CobolParser
@@ -539,3 +549,405 @@ class TestVisitorDataItems:
         assert ws.items[5].name == "WS-COMP5-BYTES"
         assert ws.items[5].redefines == "WS-COMP5-VAL"
         assert len(ws.items[5].children) == 4
+
+
+# ---------------------------------------------------------------------------
+# PROCEDURE DIVISION — statement visitors
+# ---------------------------------------------------------------------------
+
+
+class TestVisitorStatements:
+    """Tests for extracting PROCEDURE DIVISION statements.
+
+    Each test builds a minimal COBOL program with one or two statements
+    inside a MAIN-PARA paragraph, then verifies the visitor produces the
+    correct AST node. The tests cover all statement types supported by
+    the visitor: DISPLAY, MOVE, ADD, CALL, IF/ELSE/END-IF, STOP RUN,
+    GOBACK, and EXEC SQL.
+    """
+
+    def test_display_with_string_literal(self):
+        """Parse and visit:
+            DISPLAY "Hello World".
+
+        DisplayNode.operands == ['"Hello World"']
+
+        DISPLAY with a single string literal operand. The quotes are
+        preserved in the operand text because the AST captures the
+        raw token text.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. DISPTEST.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            '           DISPLAY "Hello World"\n'
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        display = stmts[0]
+        assert isinstance(display, DisplayNode)
+        assert display.operands == ['"Hello World"']
+
+    def test_display_with_variable_reference(self):
+        """Parse and visit:
+            DISPLAY "Value: " WS-FIELD.
+
+        DisplayNode.operands == ['"Value: "', 'WS-FIELD']
+
+        DISPLAY can mix string literals and variable names. Each becomes
+        a separate operand in the DisplayNode.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. DISPTEST2.\n"
+            "       DATA DIVISION.\n"
+            "       WORKING-STORAGE SECTION.\n"
+            '       01  WS-FIELD  PIC X(10) VALUE "TEST".\n'
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            '           DISPLAY "Value: " WS-FIELD\n'
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        display = stmts[0]
+        assert isinstance(display, DisplayNode)
+        assert display.operands == ['"Value: "', "WS-FIELD"]
+
+    def test_move_numeric_literal(self):
+        """Parse and visit:
+            MOVE 12345 TO WS-ORDER-ID.
+
+        MoveNode.source == '12345', MoveNode.targets == ['WS-ORDER-ID']
+
+        MOVE copies a value from source to one or more targets. This tests
+        a numeric literal as the source.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. MOVETEST.\n"
+            "       DATA DIVISION.\n"
+            "       WORKING-STORAGE SECTION.\n"
+            "       01  WS-ORDER-ID  PIC S9(9) COMP-3.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           MOVE 12345 TO WS-ORDER-ID\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        move = stmts[0]
+        assert isinstance(move, MoveNode)
+        assert move.source == "12345"
+        assert move.targets == ["WS-ORDER-ID"]
+
+    def test_move_figurative_constant_zeros(self):
+        """Parse and visit:
+            MOVE ZEROS TO WS-QUANTITY.
+
+        MoveNode.source == 'ZEROS'
+
+        ZEROS is a COBOL figurative constant that fills the target
+        with zero values. The visitor captures it as the raw text
+        without special interpretation.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. MOVETEST2.\n"
+            "       DATA DIVISION.\n"
+            "       WORKING-STORAGE SECTION.\n"
+            "       01  WS-QUANTITY  PIC S9(9) COMP-3.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           MOVE ZEROS TO WS-QUANTITY\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        move = stmts[0]
+        assert isinstance(move, MoveNode)
+        assert move.source == "ZEROS"
+
+    def test_add_numeric_literal(self):
+        """Parse and visit:
+            ADD 1000 TO WS-AMOUNT.
+
+        AddNode.value == '1000', AddNode.target == 'WS-AMOUNT'
+
+        ADD increments a variable by a value. This tests the simplest
+        form: ADD literal TO variable.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. ADDTEST.\n"
+            "       DATA DIVISION.\n"
+            "       WORKING-STORAGE SECTION.\n"
+            "       01  WS-AMOUNT  PIC S9(9) COMP-3 VALUE 70000.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           ADD 1000 TO WS-AMOUNT\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        add = stmts[0]
+        assert isinstance(add, AddNode)
+        assert add.value == "1000"
+        assert add.target == "WS-AMOUNT"
+
+    def test_call_with_using(self):
+        """Parse and visit:
+            CALL "SAFE02-CALLED" USING WS-ORDER-ID WS-QUANTITY
+                WS-RETURN-CODE.
+
+        CallNode.program_name == 'SAFE02-CALLED'
+        CallNode.using_items == ['WS-ORDER-ID', 'WS-QUANTITY',
+                                 'WS-RETURN-CODE']
+
+        CALL invokes a subprogram, passing parameters via USING.
+        The program name is a quoted literal (stripped of quotes).
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. CALLTEST.\n"
+            "       DATA DIVISION.\n"
+            "       WORKING-STORAGE SECTION.\n"
+            "       01  WS-ORDER-ID    PIC S9(9) COMP.\n"
+            "       01  WS-QUANTITY    PIC S9(9) COMP.\n"
+            "       01  WS-RETURN-CODE PIC S9(4) COMP.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            '           CALL "SAFE02-CALLED" USING WS-ORDER-ID\n'
+            "               WS-QUANTITY WS-RETURN-CODE\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        call = stmts[0]
+        assert isinstance(call, CallNode)
+        assert call.program_name == "SAFE02-CALLED"
+        assert call.using_items == ["WS-ORDER-ID", "WS-QUANTITY", "WS-RETURN-CODE"]
+
+    def test_if_else_endif(self):
+        """Parse and visit:
+            IF SQLCODE = 0
+                MOVE WS-ORA-QUANTITY TO LS-QUANTITY
+                MOVE 0 TO LS-RETURN-CODE
+            ELSE
+                MOVE 0 TO LS-QUANTITY
+                MOVE SQLCODE TO LS-RETURN-CODE
+            END-IF.
+
+        IfNode.condition contains 'SQLCODE = 0'
+        IfNode.then_statements has 2 MoveNodes
+        IfNode.else_statements has 2 MoveNodes
+
+        IF/ELSE/END-IF is COBOL's conditional. The condition text is
+        preserved with original whitespace. Both branches are visited
+        recursively to collect nested statements.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. IFTEST.\n"
+            "       DATA DIVISION.\n"
+            "       WORKING-STORAGE SECTION.\n"
+            "       01  SQLCODE         PIC S9(9) COMP.\n"
+            "       01  WS-ORA-QUANTITY PIC S9(9) COMP-5.\n"
+            "       01  LS-QUANTITY     PIC S9(9) COMP.\n"
+            "       01  LS-RETURN-CODE  PIC S9(4) COMP.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           IF SQLCODE = 0\n"
+            "               MOVE WS-ORA-QUANTITY TO LS-QUANTITY\n"
+            "               MOVE 0 TO LS-RETURN-CODE\n"
+            "           ELSE\n"
+            "               MOVE 0 TO LS-QUANTITY\n"
+            "               MOVE SQLCODE TO LS-RETURN-CODE\n"
+            "           END-IF.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        if_node = stmts[0]
+        assert isinstance(if_node, IfNode)
+        # Condition text preserves original whitespace.
+        assert "SQLCODE" in if_node.condition
+        assert "0" in if_node.condition
+        # Then-branch: two MOVE statements.
+        assert len(if_node.then_statements) == 2
+        assert all(isinstance(s, MoveNode) for s in if_node.then_statements)
+        # Else-branch: two MOVE statements.
+        assert len(if_node.else_statements) == 2
+        assert all(isinstance(s, MoveNode) for s in if_node.else_statements)
+
+    def test_stop_run(self):
+        """STOP RUN produces a StopRunNode with no fields.
+
+        STOP RUN terminates the program. It is used by main programs
+        (not by called subprograms, which use GOBACK instead).
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. STOPTEST.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        assert len(stmts) == 1
+        assert isinstance(stmts[0], StopRunNode)
+
+    def test_goback(self):
+        """GOBACK produces a GobackNode with no fields.
+
+        GOBACK returns control to the calling program. It is used by
+        called subprograms instead of STOP RUN.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. GOTEST.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           GOBACK.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        assert len(stmts) == 1
+        assert isinstance(stmts[0], GobackNode)
+
+    def test_exec_sql_include(self):
+        """Parse and visit:
+            EXEC SQL INCLUDE SQLCA END-EXEC.
+
+        ExecSqlNode.sql_text == 'INCLUDE SQLCA'
+
+        EXEC SQL embeds SQL statements in COBOL code. The visitor
+        captures the raw SQL text between EXEC SQL and END-EXEC
+        without parsing the SQL itself.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. SQLTEST1.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           EXEC SQL INCLUDE SQLCA END-EXEC\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        exec_sql = stmts[0]
+        assert isinstance(exec_sql, ExecSqlNode)
+        assert exec_sql.sql_text == "INCLUDE SQLCA"
+
+    def test_exec_sql_select_into(self):
+        """Parse and visit:
+            EXEC SQL
+                SELECT QUANTITY INTO :WS-ORA-QUANTITY
+                FROM ORDERS WHERE ORDER_ID = :WS-ORA-ORDER-ID
+            END-EXEC.
+
+        ExecSqlNode.sql_text must contain the SELECT statement
+        with host variable references preserved.
+
+        Multi-line EXEC SQL blocks are joined into a single string.
+        Host variables (prefixed with ``:``') are preserved verbatim.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. SQLTEST2.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           EXEC SQL\n"
+            "               SELECT QUANTITY INTO :WS-ORA-QUANTITY\n"
+            "               FROM ORDERS WHERE ORDER_ID = :WS-ORA-ORDER-ID\n"
+            "           END-EXEC\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        stmts = program.procedure.paragraphs[0].statements
+        exec_sql = stmts[0]
+        assert isinstance(exec_sql, ExecSqlNode)
+        assert "SELECT QUANTITY" in exec_sql.sql_text
+        assert ":WS-ORA-QUANTITY" in exec_sql.sql_text
+        assert ":WS-ORA-ORDER-ID" in exec_sql.sql_text
+
+
+# ---------------------------------------------------------------------------
+# PROCEDURE DIVISION — USING clause
+# ---------------------------------------------------------------------------
+
+
+class TestVisitorProcedureDivisionUsing:
+    """Tests for the PROCEDURE DIVISION USING clause.
+
+    Called subprograms (invoked via ``CALL ... USING``) declare their
+    parameters with ``PROCEDURE DIVISION USING param1 param2 ...``.
+    The parameter names must match the LINKAGE SECTION items.
+    Main programs have no USING clause.
+    """
+
+    def test_procedure_division_without_using(self):
+        """Programs like SAFE01 have no USING clause.
+        ProcedureDivisionNode.using_items == ()
+
+        Main programs do not receive parameters — they are the top-level
+        entry point.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. NOUSE.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           STOP RUN.\n"
+        )
+        program = _parse_and_visit(source)
+
+        assert program.procedure is not None
+        assert program.procedure.using_items == ()
+
+    def test_procedure_division_with_using(self):
+        """SAFE02-CALLED has PROCEDURE DIVISION USING LS-ORDER-ID
+        LS-QUANTITY LS-RETURN-CODE.
+
+        ProcedureDivisionNode.using_items ==
+            ('LS-ORDER-ID', 'LS-QUANTITY', 'LS-RETURN-CODE')
+
+        The USING clause declares parameters that map to LINKAGE SECTION
+        items. The order must match the CALL ... USING order in the caller.
+        """
+        source = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. USETEST.\n"
+            "       DATA DIVISION.\n"
+            "       LINKAGE SECTION.\n"
+            "       01  LS-ORDER-ID     PIC S9(9) COMP.\n"
+            "       01  LS-QUANTITY     PIC S9(9) COMP.\n"
+            "       01  LS-RETURN-CODE  PIC S9(4) COMP.\n"
+            "       PROCEDURE DIVISION USING\n"
+            "           LS-ORDER-ID\n"
+            "           LS-QUANTITY\n"
+            "           LS-RETURN-CODE.\n"
+            "       MAIN-PARA.\n"
+            "           GOBACK.\n"
+        )
+        program = _parse_and_visit(source)
+
+        assert program.procedure is not None
+        assert program.procedure.using_items == (
+            "LS-ORDER-ID",
+            "LS-QUANTITY",
+            "LS-RETURN-CODE",
+        )
