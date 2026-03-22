@@ -6,7 +6,7 @@ ANTLR4 parsing. Each test documents a specific aspect of the COBOL
 fixed-format specification.
 """
 
-import os
+from pathlib import Path
 
 from cobol_ast.preprocessor import CobolPreprocessor
 
@@ -189,41 +189,32 @@ class TestLineMapping:
         assert result.line_mapping[3] == 5
 
 
-class TestValidationMilestone:
-    """Validation milestone: preprocess all sample .cob files.
-
-    Verifies that after preprocessing, the output contains no sequence
+class TestPreprocessorStripsCommentsAndSequenceNumbers:
+    """Verifies that after preprocessing, the output contains no sequence
     numbers, no comment lines, and no inline comments. This runs against
     all six sample COBOL files in the samples/ directory.
     """
 
-    def _get_sample_files(self) -> list[str]:
+    @staticmethod
+    def _collect_cob_files(samples_dir: Path) -> list[Path]:
         """Collect all .cob files from the samples/ directory."""
-        samples_dir = os.path.join(os.path.dirname(__file__), "..", "..", "samples")
-        samples_dir = os.path.normpath(samples_dir)
-        cob_files = []
-        for root, _, files in os.walk(samples_dir):
-            for f in files:
-                if f.endswith(".cob"):
-                    cob_files.append(os.path.join(root, f))
-        return sorted(cob_files)
+        return sorted(samples_dir.rglob("*.cob"))
 
-    def test_all_sample_files_preprocess_without_errors(self):
+    def test_all_sample_files_preprocess_without_errors(self, samples_dir):
         """Every sample .cob file should preprocess without raising exceptions."""
         preprocessor = CobolPreprocessor()
-        sample_files = self._get_sample_files()
+        sample_files = self._collect_cob_files(samples_dir)
         assert len(sample_files) == 6, (
             f"Expected 6 sample files, found {len(sample_files)}"
         )
 
         for filepath in sample_files:
-            with open(filepath) as f:
-                source = f.read()
+            source = filepath.read_text()
             # Should not raise.
             result = preprocessor.process(source)
             assert result.text, f"Empty output for {filepath}"
 
-    def test_no_comment_indicators_in_preprocessed_output(self):
+    def test_no_comment_indicators_in_preprocessed_output(self, samples_dir):
         """After preprocessing, no line should start with a comment indicator.
 
         In the preprocessed output, column 7 indicators are gone. Any line
@@ -231,11 +222,10 @@ class TestValidationMilestone:
         not removed.
         """
         preprocessor = CobolPreprocessor()
-        sample_files = self._get_sample_files()
+        sample_files = self._collect_cob_files(samples_dir)
 
         for filepath in sample_files:
-            with open(filepath) as f:
-                source = f.read()
+            source = filepath.read_text()
             result = preprocessor.process(source)
 
             for line_num, line in enumerate(result.text.split("\n"), start=1):
@@ -244,11 +234,11 @@ class TestValidationMilestone:
                 # The only '*' that should appear is inside '*>' inline
                 # comments — but those should be stripped too.
                 assert "*>" not in line, (
-                    f"Inline comment '*>' found in {os.path.basename(filepath)} "
+                    f"Inline comment '*>' found in {filepath.name} "
                     f"at preprocessed line {line_num}: {line!r}"
                 )
 
-    def test_no_sequence_numbers_in_preprocessed_output(self):
+    def test_no_sequence_numbers_in_preprocessed_output(self, samples_dir):
         """After preprocessing, no line should contain the original
         6-digit sequence numbers from columns 1-6.
 
@@ -259,11 +249,10 @@ class TestValidationMilestone:
         appear at the start of any output line.
         """
         preprocessor = CobolPreprocessor()
-        sample_files = self._get_sample_files()
+        sample_files = self._collect_cob_files(samples_dir)
 
         for filepath in sample_files:
-            with open(filepath) as f:
-                source = f.read()
+            source = filepath.read_text()
 
             # Collect sequence numbers (cols 1-6) from non-empty
             # original lines that are long enough to have them.
@@ -281,7 +270,7 @@ class TestValidationMilestone:
                     assert not line.startswith(seq), (
                         f"Sequence number '{seq}' found at start of "
                         f"preprocessed line {line_num} in "
-                        f"{os.path.basename(filepath)}: {line!r}"
+                        f"{filepath.name}: {line!r}"
                     )
 
 
@@ -381,3 +370,156 @@ class TestContinuationLines:
         assert result.line_mapping[1] == 1
         # Output line 2 maps to original line 3.
         assert result.line_mapping[2] == 3
+
+
+class TestPreprocessorSampleFiles:
+    """Integration tests that run the full preprocessor against each sample
+    .cob file and verify file-specific content is preserved.
+
+    While TestValidationMilestone checks generic invariants (no comments,
+    no sequence numbers) across all files, these tests spot-check specific
+    COBOL constructs in each sample to verify that the preprocessor
+    preserves semantically important content.
+    """
+
+    def test_preprocess_safe01_preserves_all_data_items(self, safe01_source):
+        """SAFE01.cob defines five WORKING-STORAGE items:
+        WS-ORDER-ID (COMP-3), WS-AMOUNT (COMP-3), WS-COUNTER (DISPLAY),
+        WS-BALANCE (DISPLAY), WS-STATUS (PIC X).
+
+        After preprocessing, all five data item names must appear
+        in the output, and no sequence numbers or comments remain.
+        """
+        preprocessor = CobolPreprocessor()
+        result = preprocessor.process(safe01_source)
+        text = result.text
+
+        # All five WORKING-STORAGE data items must survive preprocessing.
+        assert "WS-ORDER-ID" in text
+        assert "WS-AMOUNT" in text
+        assert "WS-COUNTER" in text
+        assert "WS-BALANCE" in text
+        assert "WS-STATUS" in text
+
+        # Key division/section keywords must be present.
+        assert "IDENTIFICATION DIVISION" in text
+        assert "PROGRAM-ID" in text
+        assert "PROCEDURE DIVISION" in text
+        assert "WORKING-STORAGE SECTION" in text
+
+        # Comments should be stripped — the original file has many
+        # comment lines starting with '*' in column 7.
+        for line in text.split("\n"):
+            assert "*>" not in line
+
+    def test_preprocess_endian01_preserves_redefines_structure(self, endian01_source):
+        """ENDIAN01.cob uses REDEFINES three times to overlay byte-level
+        access on COMP and COMP-5 fields. The preprocessor must
+        preserve the REDEFINES clauses and the subordinate level-05
+        items exactly.
+        """
+        preprocessor = CobolPreprocessor()
+        result = preprocessor.process(endian01_source)
+        text = result.text
+
+        # Three REDEFINES clauses in the WORKING-STORAGE SECTION:
+        # 1. WS-ORDER-BYTES REDEFINES WS-ORDER-ID
+        # 2. WS-COMP-BYTES REDEFINES WS-COMP-VAL
+        # 3. WS-COMP5-BYTES REDEFINES WS-COMP5-VAL
+        assert "WS-ORDER-BYTES" in text
+        assert "REDEFINES" in text
+        assert "WS-COMP-BYTES" in text
+        assert "WS-COMP5-BYTES" in text
+
+        # The subordinate level-05 items under each REDEFINES group.
+        assert "WS-BYTE-1" in text
+        assert "WS-BYTE-4" in text
+        assert "WS-CB-1" in text
+        assert "WS-C5B-1" in text
+
+        # COMP-5 type must survive (it's in the code area, not a comment).
+        assert "COMP-5" in text
+
+    def test_preprocess_endian02_called_preserves_exec_sql(
+        self, endian02_called_source
+    ):
+        """ENDIAN02-CALLED.cob contains two EXEC SQL blocks:
+        1. EXEC SQL INCLUDE SQLCA END-EXEC
+        2. EXEC SQL SELECT ... END-EXEC
+
+        The preprocessor must pass EXEC SQL content through unchanged.
+        The SQL text between EXEC SQL and END-EXEC must not be altered.
+        """
+        preprocessor = CobolPreprocessor()
+        result = preprocessor.process(endian02_called_source)
+        text = result.text
+
+        # Both EXEC SQL blocks must be present.
+        assert "EXEC SQL INCLUDE SQLCA END-EXEC" in text
+        assert "EXEC SQL" in text
+
+        # The SELECT statement's key clauses must survive.
+        assert "SELECT QUANTITY" in text
+        assert "INTO :WS-QUANTITY" in text
+        assert "FROM ORDERS" in text
+        assert "WHERE ORDER_ID = :LS-ORDER-ID" in text
+        assert "END-EXEC" in text
+
+        # LINKAGE SECTION parameters must be preserved.
+        assert "LINKAGE SECTION" in text
+        assert "LS-ORDER-ID" in text
+        assert "LS-QUANTITY" in text
+        assert "LS-RETURN-CODE" in text
+
+    def test_preprocess_safe02_called_preserves_linkage_section(
+        self, safe02_called_source
+    ):
+        """SAFE02-CALLED.cob has a LINKAGE SECTION with three parameters.
+        The preprocessor must preserve the LINKAGE SECTION keyword and
+        all three data item definitions.
+        """
+        preprocessor = CobolPreprocessor()
+        result = preprocessor.process(safe02_called_source)
+        text = result.text
+
+        # LINKAGE SECTION and its three parameters.
+        assert "LINKAGE SECTION" in text
+        assert "LS-ORDER-ID" in text
+        assert "LS-QUANTITY" in text
+        assert "LS-RETURN-CODE" in text
+
+        # The COMP-5 working-storage variables used for Oracle host vars.
+        assert "WS-ORA-ORDER-ID" in text
+        assert "WS-ORA-QUANTITY" in text
+
+        # EXEC SQL with SQLCA5 (the correct pattern).
+        assert "EXEC SQL INCLUDE SQLCA5 END-EXEC" in text
+
+    def test_all_sample_files_preprocess_without_errors(self, samples_dir):
+        """Smoke test: every .cob file under samples/ preprocesses
+        without raising any exceptions.
+
+        This is the primary validation milestone — confirming that the
+        Python preprocessor can normalize all six sample files.
+        """
+        preprocessor = CobolPreprocessor()
+        cob_files = sorted(samples_dir.rglob("*.cob"))
+        assert len(cob_files) == 6, (
+            f"Expected 6 sample files, found {len(cob_files)}: "
+            f"{[f.name for f in cob_files]}"
+        )
+
+        for filepath in cob_files:
+            source = filepath.read_text()
+            result = preprocessor.process(source)
+
+            # Output must be non-empty.
+            assert result.text.strip(), f"Empty output for {filepath.name}"
+
+            # Every sample file must produce output containing these
+            # fundamental COBOL keywords.
+            assert "IDENTIFICATION" in result.text, (
+                f"Missing IDENTIFICATION in {filepath.name}"
+            )
+            assert "PROGRAM-ID" in result.text, f"Missing PROGRAM-ID in {filepath.name}"
+            assert "PROCEDURE" in result.text, f"Missing PROCEDURE in {filepath.name}"
