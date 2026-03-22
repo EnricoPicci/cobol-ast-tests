@@ -58,11 +58,12 @@ python/
 │       ├── visitor.py               # CST-to-AST Visitor
 │       ├── ast_nodes.py             # Typed AST dataclasses
 │       └── generated/               # ANTLR4-generated code (committed to repo)
-│           ├── Cobol85Lexer.py
-│           ├── Cobol85Parser.py
-│           ├── Cobol85Visitor.py
-│           ├── Cobol85Listener.py
-│           └── *.interp, *.tokens
+│           └── grammar/             # Mirrors input path (ANTLR4 default layout)
+│               ├── Cobol85Lexer.py
+│               ├── Cobol85Parser.py
+│               ├── Cobol85Visitor.py
+│               ├── Cobol85Listener.py
+│               └── *.interp, *.tokens
 ├── tests/
 │   ├── conftest.py                  # Shared fixtures (sample file paths, helpers)
 │   ├── test_scaffolding.py          # Verify ANTLR4 imports and generated code
@@ -144,7 +145,7 @@ These are needed by everyone working on the code — running tests, linting, and
 antlr4-tools==0.2.1
 ```
 
-`antlr4-tools` is a pip-installable wrapper around the ANTLR4 code generator maintained by the ANTLR4 team. It provides the `antlr4` CLI command and **automatically downloads a JRE if Java is not installed on the machine**, eliminating the need to manually install Java or download the ANTLR4 JAR.
+`antlr4-tools` is a pip-installable wrapper around the ANTLR4 code generator maintained by the ANTLR4 team. It provides the `antlr4` CLI command. It is supposed to auto-download a JRE if Java is not installed, but this does not always work — see `grammar/README.md` for the workaround.
 
 - The `antlr4-tools` version must be compatible with the `antlr4-python3-runtime` version. Both must target the same ANTLR4 release (4.13.2).
 - Only needed when regenerating the parser from the grammar. Most developers never need this — the generated files are committed to the repository.
@@ -182,7 +183,7 @@ This is all that most developers need. The generated parser files are already co
 
 ```bash
 # Only needed when the grammar changes — most developers can skip this.
-# Install antlr4-tools first (auto-downloads a JRE if Java is not installed):
+# Install antlr4-tools first (requires Java — see grammar/README.md if not installed):
 pip install -r requirements-build.txt
 
 # Generate the parser:
@@ -191,9 +192,10 @@ antlr4 \
     -visitor \
     -listener \
     -o src/cobol_ast/generated \
-    -package cobol_ast.generated \
     grammar/Cobol85.g4
 ```
+
+ANTLR4 mirrors the input grammar path under the `-o` directory, so the generated files end up in `src/cobol_ast/generated/grammar/`. This is the intended layout — import from `cobol_ast.generated.grammar`.
 
 The generated files are committed to the repository so contributors do not need `antlr4-tools` for normal development. Only install `requirements-build.txt` if you need to regenerate the parser after modifying the grammar.
 
@@ -224,14 +226,14 @@ ruff format .
 
 **How:**
 
-1. Create directory structure: `src/cobol_ast/`, `src/cobol_ast/generated/`, `tests/`, `grammar/`.
+1. Create directory structure: `src/cobol_ast/`, `src/cobol_ast/generated/grammar/`, `tests/`, `grammar/`.
 2. Create `__init__.py` files for the package.
 3. Create `pyproject.toml` with project metadata, ruff configuration, and pytest settings.
 4. Create `requirements.txt` with the runtime dependency (`antlr4-python3-runtime==4.13.2`).
 5. Create `requirements-dev.txt` with dev tools (`pytest==8.3.4`, `ruff==0.9.7`).
 6. Create `requirements-build.txt` with the parser generation tool (`antlr4-tools==0.2.1`).
 7. Download `Cobol85.g4` (and `Cobol85Lexer.g4` if the grammar is split) from `grammars-v4`.
-8. Install `requirements-build.txt` and run `antlr4` to generate the Python lexer, parser, visitor, and listener. On first run, `antlr4-tools` will automatically download a JRE if Java is not installed.
+8. Install `requirements-build.txt` and run `antlr4` to generate the Python lexer, parser, visitor, and listener into `src/cobol_ast/generated/grammar/` (ANTLR4 mirrors the input path under `-o`). If Java is not installed, see `grammar/README.md` for the JDK workaround.
 9. Verify the generated code imports without errors.
 10. Create `grammar/README.md` documenting the grammar version, source URL, and any local modifications.
 
@@ -241,7 +243,7 @@ ruff format .
 - `python/requirements-dev.txt`
 - `python/requirements-build.txt`
 - `python/src/cobol_ast/__init__.py`
-- `python/src/cobol_ast/generated/` (generated files)
+- `python/src/cobol_ast/generated/grammar/` (generated files)
 - `python/grammar/Cobol85.g4`
 - `python/grammar/README.md`
 
@@ -263,14 +265,14 @@ def test_antlr4_runtime_imports():
 def test_generated_parser_imports():
     """Verify that the ANTLR4-generated COBOL parser is importable.
 
-    The generated code lives in src/cobol_ast/generated/ and includes
-    the Lexer (tokenizer), Parser (grammar rules), and Visitor (tree
-    walker base class). All three must import without errors for the
-    rest of the pipeline to work.
+    The generated code lives in src/cobol_ast/generated/grammar/ and
+    includes the Lexer (tokenizer), Parser (grammar rules), and Visitor
+    (tree walker base class). All three must import without errors for
+    the rest of the pipeline to work.
     """
-    from cobol_ast.generated import Cobol85Lexer
-    from cobol_ast.generated import Cobol85Parser
-    from cobol_ast.generated import Cobol85Visitor
+    from cobol_ast.generated.grammar import Cobol85Lexer
+    from cobol_ast.generated.grammar import Cobol85Parser
+    from cobol_ast.generated.grammar import Cobol85Visitor
 ```
 
 ---
@@ -1578,7 +1580,7 @@ All file paths in the steps match the Architecture section. The data flow (prepr
 | Risk (from parser-evaluation.md) | Addressed in |
 |---|---|
 | Preprocessor correctness | Steps 2–4 (dedicated tests, sample file validation) |
-| Version coupling | Step 1 (pinned versions in requirements.txt + requirements-dev.txt + requirements-build.txt, committed generated code, antlr4-tools handles JRE automatically) |
+| Version coupling | Step 1 (pinned versions in requirements.txt + requirements-dev.txt + requirements-build.txt, committed generated code) |
 | CST-to-AST complexity | Steps 10–12 (incremental, one construct at a time) |
 | EXEC SQL handling | Steps 7, 8, 12 (opaque block approach, dedicated tests) |
 | Micro Focus dialect gaps | Step 1 (grammar covers COMP-5; sample files validated in Step 9) |

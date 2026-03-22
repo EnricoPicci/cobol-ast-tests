@@ -1,0 +1,17 @@
+[project]
+name = "cobol-ast"
+version = "0.1.0"
+description = "Educational examples of using AST parsers to analyze COBOL code"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+exclude = [".venv", "src/cobol_ast/generated/grammar"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
