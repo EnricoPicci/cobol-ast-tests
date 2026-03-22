@@ -13,7 +13,10 @@ cobol-ast-tests/
 │   ├── tests/        # pytest test suite
 │   └── CLAUDE.md     # Python-specific guidelines
 ├── samples/          # COBOL source files shared across ALL languages (language-invariant)
-├── prompts/          # Prompt files for Claude Code
+├── ast-docs/         # Documentation about AST parsing concepts
+├── cobol-docs/       # Documentation about COBOL-specific topics
+├── prompts/          # Prompt files for Claude Code (numbered sequentially)
+├── README.md         # Project README for newcomers
 └── CLAUDE.md         # Project-wide guidelines (this file)
 ```
 
@@ -50,7 +53,11 @@ After every code change, verify that the following are still accurate and update
 
 1. **Docstrings and comments** — Do they still describe what the code does?
 2. **Tests** — Do existing tests still pass? Do new behaviors need new tests? Do test comments still match the test logic?
-3. **README.md** — Does it reflect the current state of the project?
+3. **README.md** — Does it reflect the current state of the project? The README is the front door for newcomers. It **must** be updated whenever:
+   - A key document is added or removed — any document that a newcomer to the project should know about.
+   - A new language implementation is added (add it to the Languages section and update the project structure).
+   - The project structure changes materially (new top-level directories, renamed directories).
+   When in doubt, re-run the README generation prompt (`prompts/11-generate-readme.md`) to regenerate it from scratch.
 4. **This file (CLAUDE.md)** — Does the project structure or workflow section need updating?
 
 Do not skip this step. Treat outdated documentation as a bug.
