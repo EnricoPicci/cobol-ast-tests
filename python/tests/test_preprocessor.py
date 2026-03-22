@@ -276,12 +276,108 @@ class TestValidationMilestone:
 
             result = preprocessor.process(source)
 
-            for line_num, line in enumerate(
-                result.text.split("\n"), start=1
-            ):
+            for line_num, line in enumerate(result.text.split("\n"), start=1):
                 for seq in seq_numbers:
                     assert not line.startswith(seq), (
                         f"Sequence number '{seq}' found at start of "
                         f"preprocessed line {line_num} in "
                         f"{os.path.basename(filepath)}: {line!r}"
                     )
+
+
+class TestContinuationLines:
+    """Tests for COBOL continuation-line handling.
+
+    In fixed-format COBOL, a hyphen ('-') in column 7 marks a continuation
+    line. The content of that line is appended to the previous line. This
+    mechanism allows long literals, identifiers, and statements to span
+    multiple source lines.
+    """
+
+    def test_hyphen_in_column_7_joins_to_previous_line(self):
+        """Column 7 = '-' means continuation. The content of the
+        continuation line is appended to the previous line.
+
+        Line 1: '      ' + ' ' + '       MOVE "HELLO'
+        Line 2: '      ' + '-' + '           WORLD" TO WS-VAR'
+        Result: '       MOVE "HELLOWORLD" TO WS-VAR'
+
+        The hyphen indicator, sequence area, and leading spaces of
+        the continuation are stripped; the content is appended.
+        """
+        preprocessor = CobolPreprocessor()
+        # Line 1: cols 1-6 = '000100', col 7 = ' ', cols 8-72 = code
+        # Line 2: cols 1-6 = '000200', col 7 = '-', cols 8-72 = continuation
+        source = "000100        MOVE A TO\n000200-           B"
+        result = preprocessor.process(source)
+
+        lines = result.text.split("\n")
+        # Both lines should be joined into one.
+        assert len(lines) == 1
+        assert "MOVE A TO" in lines[0]
+        assert "B" in lines[0]
+
+    def test_literal_continuation_preserves_quote_content(self):
+        """When continuing a string literal, the continuation line
+        starts with a quote character. The preprocessor must join
+        the strings without inserting extra spaces or losing characters.
+
+        The previous line ends with an unclosed quote, e.g.:
+            '       DISPLAY "HELLO'
+        The continuation line provides the rest of the literal:
+            '           "WORLD"'
+        The result should be:
+            '       DISPLAY "HELLOWORLD"'
+        """
+        preprocessor = CobolPreprocessor()
+        # Previous line ends mid-literal with unclosed quote
+        line1 = '000100        DISPLAY "HELLO'
+        # Continuation line: col 7 = '-', starts with quote after spaces
+        line2 = '000200-           "WORLD"'
+        source = f"{line1}\n{line2}"
+        result = preprocessor.process(source)
+
+        lines = result.text.split("\n")
+        assert len(lines) == 1
+        # The two parts should be joined as one literal: "HELLOWORLD"
+        assert '"HELLOWORLD"' in lines[0]
+
+    def test_multiple_consecutive_continuations(self):
+        """A single statement can span three or more lines with
+        multiple continuation lines. All must be joined correctly.
+        """
+        preprocessor = CobolPreprocessor()
+        source = "000100        MOVE A\n000200-           TO\n000300-           B"
+        result = preprocessor.process(source)
+
+        lines = result.text.split("\n")
+        # All three lines joined into one.
+        assert len(lines) == 1
+        assert "MOVE A" in lines[0]
+        assert "TO" in lines[0]
+        assert "B" in lines[0]
+
+    def test_continuation_updates_line_mapping(self):
+        """The line mapping must reflect that continuation lines
+        are merged into their predecessor, so error messages point
+        to the original source lines.
+
+        When lines 1, 2 (continuation), and 3 produce two output lines,
+        the mapping should point output line 1 back to original line 1
+        (the first line of the merged group).
+        """
+        preprocessor = CobolPreprocessor()
+        source = (
+            "000100        MOVE A\n"  # original line 1
+            "000200-           TO B.\n"  # original line 2 (continuation)
+            "000300        STOP RUN."  # original line 3
+        )
+        result = preprocessor.process(source)
+
+        lines = result.text.split("\n")
+        assert len(lines) == 2
+
+        # Output line 1 maps to original line 1 (the first line of the group).
+        assert result.line_mapping[1] == 1
+        # Output line 2 maps to original line 3.
+        assert result.line_mapping[2] == 3
