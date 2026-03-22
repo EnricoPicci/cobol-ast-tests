@@ -12,6 +12,11 @@ divides each line into columns with specific meanings:
 The ANTLR4 Cobol85 grammar expects free-form input — it does not handle
 column positions. This module strips the fixed-format layout and produces
 clean text suitable for parsing.
+
+Additionally, the grammar requires EXEC SQL blocks to be tagged: each line
+that is part of an EXEC SQL ... END-EXEC block must be prefixed with the
+``*>EXECSQL`` tag. This module detects these blocks and applies the tags
+so the grammar's ``EXECSQLLINE`` lexer rule can match them.
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ _COMMENT_INDICATORS = {"*", "/", "D", "d"}
 class CobolPreprocessor:
     """Transforms fixed-format COBOL source into free-form text.
 
-    The preprocessor performs four operations in order:
+    The preprocessor performs five operations in order:
 
     1. **Column stripping** — removes the sequence number area (cols 1-6)
        and the identification area (cols 73-80), keeping only the indicator
@@ -56,7 +61,10 @@ class CobolPreprocessor:
        the continuation line's content is appended to the previous line.
        For literal continuations the opening quote on the continuation is
        consumed so the string resumes seamlessly.
-    4. **Line mapping** — records which original source line produced each
+    4. **EXEC SQL tagging** — the ANTLR4 Cobol85 grammar requires lines
+       inside EXEC SQL ... END-EXEC blocks to be prefixed with ``*>EXECSQL``.
+       The preprocessor detects these blocks and adds the tag to each line.
+    5. **Line mapping** — records which original source line produced each
        output line, so downstream error messages stay accurate.
 
     Example::
@@ -80,6 +88,12 @@ class CobolPreprocessor:
         lines = source.splitlines()
         output_lines: list[str] = []
         line_mapping: dict[int, int] = {}
+
+        # Track whether we are inside an EXEC SQL ... END-EXEC block.
+        # The ANTLR4 Cobol85 grammar requires each line of an EXEC SQL
+        # block to be prefixed with '*>EXECSQL' so the lexer can match
+        # them as EXECSQLLINE tokens.
+        in_exec_sql = False
 
         for original_line_num, line in enumerate(lines, start=1):
             # Lines shorter than 7 characters have no indicator column
@@ -116,6 +130,23 @@ class CobolPreprocessor:
             inline_comment_pos = code_area.find("*>")
             if inline_comment_pos != -1:
                 code_area = code_area[:inline_comment_pos]
+
+            # Tag EXEC SQL blocks for the ANTLR4 grammar.
+            # Detect the start of an EXEC SQL block and tag every line
+            # until END-EXEC is found (inclusive).
+            code_upper = code_area.upper().strip()
+            if not in_exec_sql and "EXEC SQL" in code_upper:
+                in_exec_sql = True
+
+            if in_exec_sql:
+                # Prefix with *>EXECSQL tag as required by the grammar's
+                # EXECSQLLINE lexer rule.
+                output_lines.append("*>EXECSQL" + code_area)
+                line_mapping[len(output_lines)] = original_line_num
+                # Check if this line ends the EXEC SQL block.
+                if "END-EXEC" in code_upper:
+                    in_exec_sql = False
+                continue
 
             output_lines.append(code_area)
             line_mapping[len(output_lines)] = original_line_num

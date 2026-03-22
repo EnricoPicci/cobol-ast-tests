@@ -91,7 +91,7 @@ COBOL source (.cob file)
     ▼
 ┌──────────────┐
 │ preprocessor │  Strips columns 1-6 and 73-80, handles column 7 indicators,
-│              │  removes comments, joins continuation lines
+│              │  removes comments, joins continuation lines, tags EXEC SQL blocks
 └──────┬───────┘
        │  (normalized free-form text)
        ▼
@@ -277,11 +277,11 @@ def test_generated_parser_imports():
 
 ---
 
-### Step 2: Preprocessor — Column Stripping and Comment Removal
+### Step 2: Preprocessor — Column Stripping, Comment Removal, and EXEC SQL Tagging
 
-**What:** Build the first part of `CobolPreprocessor`: stripping the sequence number area (columns 1–6), the identification area (columns 73–80), and removing full-line comments (column 7 = `*`) and inline comments (`*>`).
+**What:** Build the first part of `CobolPreprocessor`: stripping the sequence number area (columns 1–6), the identification area (columns 73–80), removing full-line comments (column 7 = `*`) and inline comments (`*>`), and tagging EXEC SQL blocks with the `*>EXECSQL` prefix required by the ANTLR4 grammar.
 
-**Why:** COBOL's fixed-format layout is fundamental to reading COBOL source. The ANTLR4 Cobol85 grammar expects free-form input — it does not handle column positions. The preprocessor transforms fixed-format COBOL into a form the grammar can parse. Column stripping and comment removal are the simplest preprocessing concerns and must be correct before anything else works.
+**Why:** COBOL's fixed-format layout is fundamental to reading COBOL source. The ANTLR4 Cobol85 grammar expects free-form input — it does not handle column positions. The preprocessor transforms fixed-format COBOL into a form the grammar can parse. Column stripping, comment removal, and EXEC SQL tagging are preprocessing concerns that must be correct before anything else works. The grammar's `EXECSQLLINE` lexer rule requires each line inside an `EXEC SQL ... END-EXEC` block to start with `*>EXECSQL` — without this tag, files containing embedded SQL will fail to parse.
 
 **How:**
 
@@ -292,7 +292,8 @@ def test_generated_parser_imports():
   2. For each line, if length >= 7 and column 7 is `*`, skip the line (full-line comment).
   3. For each line, extract columns 7–72 (the code area, 0-indexed: characters 6–71). If the line is shorter than 7 characters, treat it as blank.
   4. Strip inline comments: find `*>` in the code area and truncate at that position.
-  5. Record the mapping from output line numbers to original source line numbers.
+  5. Tag EXEC SQL blocks: when a line contains `EXEC SQL`, prefix it and all subsequent lines with `*>EXECSQL` until `END-EXEC` is found (inclusive). The ANTLR4 Cobol85 grammar requires this tag — its `EXECSQLLINE` lexer rule matches lines starting with `*>EXECSQL`.
+  6. Record the mapping from output line numbers to original source line numbers.
 - Column 7 indicator `*` means comment. Indicator `/` also means comment (page break). Indicator `D` or `d` means debug line — treat as comment for now (configurable later). Blank or space means normal code line. Hyphen `-` means continuation — handled in Step 3.
 
 **Where:**
@@ -374,7 +375,7 @@ class TestLineMapping:
         """
 ```
 
-**Validation milestone:** After this step, preprocess all six sample `.cob` files and verify the output contains no sequence numbers, no comment lines, and no inline comments.
+**Validation milestone:** After this step, preprocess all six sample `.cob` files and verify the output contains no sequence numbers, no comment lines, and no inline comments. Lines inside EXEC SQL blocks should be prefixed with `*>EXECSQL`.
 
 ---
 
@@ -443,7 +444,7 @@ class TestContinuationLines:
 - For each of the six sample files, run `CobolPreprocessor.process()` on the raw file content.
 - Assert that:
   - No line in the output starts with 6 characters of sequence numbers (columns 1–6 stripped).
-  - No line contains `*>` (inline comments removed).
+  - No line contains `*>` except for `*>EXECSQL` tags (inline comments removed; EXEC SQL tags are intentional).
   - No line has column 7 = `*` (full-line comments removed).
   - The output is non-empty and contains expected keywords (`IDENTIFICATION`, `PROGRAM-ID`, `PROCEDURE`).
 - Spot-check specific output lines for each file to verify content preservation.
@@ -491,13 +492,15 @@ class TestPreprocessorSampleFiles:
         items exactly.
         """
 
-    def test_preprocess_endian02_called_preserves_exec_sql(self, endian02_called_source):
+    def test_preprocess_endian02_called_tags_exec_sql(self, endian02_called_source):
         """ENDIAN02-CALLED.cob contains two EXEC SQL blocks:
         1. EXEC SQL INCLUDE SQLCA END-EXEC
         2. EXEC SQL SELECT ... END-EXEC
 
-        The preprocessor must pass EXEC SQL content through unchanged.
-        The SQL text between EXEC SQL and END-EXEC must not be altered.
+        The preprocessor must tag each line of an EXEC SQL block with
+        the ``*>EXECSQL`` prefix required by the ANTLR4 grammar. The
+        SQL text between EXEC SQL and END-EXEC must not be altered
+        (only prefixed).
         """
 
     def test_preprocess_safe02_called_preserves_linkage_section(self, safe02_called_source):
@@ -998,8 +1001,10 @@ class TestCobolParser:
     def test_parse_exec_sql_block(self):
         """Parse a program containing EXEC SQL ... END-EXEC.
 
-        The ANTLR4 grammar has rules for EXEC SQL statements.
-        The parser must handle them without errors.
+        The ANTLR4 grammar requires EXEC SQL lines to be prefixed with
+        the ``*>EXECSQL`` tag (the preprocessor adds this). The grammar's
+        ``EXECSQLLINE`` lexer rule matches tagged lines. The parser must
+        handle them without errors.
         """
 ```
 
@@ -1009,7 +1014,7 @@ class TestCobolParser:
 
 **What:** Integration tests that run the full pipeline (preprocessor → parser) against all six sample files and verify zero parse errors.
 
-**Why:** This is the second spike question from parser-evaluation.md: "What does the parse tree look like for a sample file?" and validates that the preprocessor output is compatible with the ANTLR4 grammar. If any sample file fails to parse, we know the preprocessor has a bug or the grammar needs adjustment.
+**Why:** This is the second spike question from parser-evaluation.md: "What does the parse tree look like for a sample file?" and validates that the preprocessor output (including EXEC SQL tagging) is compatible with the ANTLR4 grammar. If any sample file fails to parse, it indicates a mismatch between the preprocessor output and the grammar's expectations.
 
 **How:**
 
@@ -1542,6 +1547,7 @@ Cross-referenced against parser-evaluation.md requirements table:
 | Numeric and string literals | Steps 11, 12 |
 | Fixed-format layout (columns) | Steps 2, 3 |
 | Full-line comments, inline comments | Step 2 |
+| EXEC SQL block tagging (`*>EXECSQL`) | Step 2 |
 
 All constructs from the requirements table are covered.
 
@@ -1582,5 +1588,5 @@ All file paths in the steps match the Architecture section. The data flow (prepr
 | Preprocessor correctness | Steps 2–4 (dedicated tests, sample file validation) |
 | Version coupling | Step 1 (pinned versions in requirements.txt + requirements-dev.txt + requirements-build.txt, committed generated code) |
 | CST-to-AST complexity | Steps 10–12 (incremental, one construct at a time) |
-| EXEC SQL handling | Steps 7, 8, 12 (opaque block approach, dedicated tests) |
+| EXEC SQL handling | Step 2 (preprocessor tagging), Steps 7, 8, 12 (opaque block approach, dedicated tests) |
 | Micro Focus dialect gaps | Step 1 (grammar covers COMP-5; sample files validated in Step 9) |

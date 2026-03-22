@@ -215,11 +215,13 @@ class TestPreprocessorStripsCommentsAndSequenceNumbers:
             assert result.text, f"Empty output for {filepath}"
 
     def test_no_comment_indicators_in_preprocessed_output(self, samples_dir):
-        """After preprocessing, no line should start with a comment indicator.
+        """After preprocessing, no line should contain inline comment markers.
 
         In the preprocessed output, column 7 indicators are gone. Any line
         starting with '*' (from a full-line comment) means the comment was
-        not removed.
+        not removed. The only permitted use of '*>' is the ``*>EXECSQL``
+        tag that the preprocessor adds to EXEC SQL block lines — these are
+        required by the ANTLR4 grammar's EXECSQLLINE lexer rule.
         """
         preprocessor = CobolPreprocessor()
         sample_files = self._collect_cob_files(samples_dir)
@@ -229,10 +231,15 @@ class TestPreprocessorStripsCommentsAndSequenceNumbers:
             result = preprocessor.process(source)
 
             for line_num, line in enumerate(result.text.split("\n"), start=1):
+                # Lines tagged with *>EXECSQL are EXEC SQL block lines —
+                # the tag is intentional and required by the grammar.
+                if line.startswith("*>EXECSQL"):
+                    continue
                 # In the output, line content starts at what was column 7.
                 # Full-line comments should have been removed entirely.
-                # The only '*' that should appear is inside '*>' inline
-                # comments — but those should be stripped too.
+                # The only '*>' that should appear is the EXECSQL tag
+                # (handled above) — any other '*>' is an unstripped
+                # inline comment.
                 assert "*>" not in line, (
                     f"Inline comment '*>' found in {filepath.name} "
                     f"at preprocessed line {line_num}: {line!r}"
