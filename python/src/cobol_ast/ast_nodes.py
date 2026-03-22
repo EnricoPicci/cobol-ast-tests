@@ -18,13 +18,17 @@ passes and makes it safe to share AST references across consumers.
 
 DataItemNode, PicClause, and UsageType capture data description entries
 (variable declarations with PIC clauses, USAGE types, and VALUE clauses).
-Later steps add ParagraphNode and statement nodes for executable code.
+
+Statement nodes (DisplayNode, MoveNode, AddNode, CallNode, IfNode,
+StopRunNode, GobackNode, ExecSqlNode) represent executable PROCEDURE
+DIVISION statements. ParagraphNode groups statements under a named label.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Union
 
 
 class UsageType(Enum):
@@ -143,18 +147,144 @@ class DataDivisionNode:
 
 
 @dataclass(frozen=True)
+class DisplayNode:
+    """DISPLAY statement — outputs values to the console.
+
+    DISPLAY can take a mix of string literals and variable names.
+    Example: DISPLAY "ORDER-ID: " WS-ORDER-ID
+    """
+
+    operands: list[str]  # String literals and/or data names
+
+
+@dataclass(frozen=True)
+class MoveNode:
+    """MOVE statement — copies a value from source to target(s).
+
+    MOVE is COBOL's assignment statement.
+    Example: MOVE 12345 TO WS-ORDER-ID
+    Example: MOVE ZEROS TO WS-QUANTITY
+    """
+
+    source: str  # Source value (literal, name, or figurative constant)
+    targets: list[str]  # One or more target data names
+
+
+@dataclass(frozen=True)
+class AddNode:
+    """ADD statement — adds a value to a variable.
+
+    Example: ADD 1000 TO WS-AMOUNT
+    """
+
+    value: str
+    target: str
+
+
+@dataclass(frozen=True)
+class CallNode:
+    """CALL statement — invokes a subprogram.
+
+    Example: CALL "SAFE02-CALLED" USING WS-ORDER-ID WS-QUANTITY WS-RETURN-CODE
+    """
+
+    program_name: str
+    using_items: list[str]
+
+
+@dataclass(frozen=True)
+class StopRunNode:
+    """STOP RUN — terminates the program.
+
+    Used by main programs to end execution.
+    """
+
+    pass
+
+
+@dataclass(frozen=True)
+class GobackNode:
+    """GOBACK — returns control to the calling program.
+
+    Used by called subprograms instead of STOP RUN.
+    """
+
+    pass
+
+
+@dataclass(frozen=True)
+class ExecSqlNode:
+    """EXEC SQL ... END-EXEC — embedded SQL statement.
+
+    The SQL content is captured as raw text. The parser does not
+    parse SQL itself — it treats the content between EXEC SQL and
+    END-EXEC as an opaque block.
+
+    Examples from the samples:
+    - EXEC SQL INCLUDE SQLCA END-EXEC
+    - EXEC SQL SELECT QUANTITY INTO :WS-ORA-QUANTITY FROM ORDERS
+          WHERE ORDER_ID = :WS-ORA-ORDER-ID END-EXEC
+    """
+
+    sql_text: str  # Raw SQL between EXEC SQL and END-EXEC
+
+
+# StatementNode is a Union of all statement types. The visitor produces
+# these when walking PROCEDURE DIVISION paragraphs.
+StatementNode = Union[
+    DisplayNode,
+    MoveNode,
+    AddNode,
+    CallNode,
+    "IfNode",
+    StopRunNode,
+    GobackNode,
+    ExecSqlNode,
+]
+
+
+@dataclass(frozen=True)
+class IfNode:
+    """IF / ELSE / END-IF conditional statement.
+
+    Example:
+        IF SQLCODE = 0
+            MOVE WS-ORA-QUANTITY TO LS-QUANTITY
+        ELSE
+            MOVE 0 TO LS-QUANTITY
+        END-IF
+    """
+
+    condition: str  # Raw condition text
+    then_statements: list[StatementNode]
+    else_statements: list[StatementNode]
+
+
+@dataclass(frozen=True)
+class ParagraphNode:
+    """A named paragraph in the PROCEDURE DIVISION.
+
+    Paragraphs are labeled blocks of statements. All sample files
+    use MAIN-PARA as their primary paragraph.
+    """
+
+    name: str
+    statements: list[StatementNode]
+
+
+@dataclass(frozen=True)
 class ProcedureDivisionNode:
     """PROCEDURE DIVISION — the executable code.
 
     May include a USING clause listing parameters (matching the
     LINKAGE SECTION items) for called programs.
 
-    The ``paragraphs`` list will hold ``ParagraphNode`` instances once
-    that type is defined in Step 7.
+    The ``paragraphs`` list holds ``ParagraphNode`` instances that
+    group named statement blocks.
     """
 
     using_items: tuple[str, ...] = field(default_factory=tuple)
-    paragraphs: tuple[object, ...] = field(default_factory=tuple)
+    paragraphs: tuple[ParagraphNode, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

@@ -9,14 +9,23 @@ dataclass that models it.
 """
 
 from cobol_ast.ast_nodes import (
+    AddNode,
+    CallNode,
     DataDivisionNode,
     DataItemNode,
+    DisplayNode,
     EnvironmentDivisionNode,
+    ExecSqlNode,
+    GobackNode,
     IdentificationDivisionNode,
+    IfNode,
     LinkageSectionNode,
+    MoveNode,
+    ParagraphNode,
     PicClause,
     ProcedureDivisionNode,
     ProgramNode,
+    StopRunNode,
     UsageType,
     WorkingStorageSectionNode,
 )
@@ -177,11 +186,28 @@ class TestProcedureDivision:
         assert proc.using_items == ()
 
     def test_procedure_division_paragraphs_default_empty(self):
-        """Paragraphs (ParagraphNode) are added in Step 7.
-        Until then, the list defaults to empty.
-        """
+        """A PROCEDURE DIVISION with no paragraphs has an empty tuple."""
         proc = ProcedureDivisionNode()
         assert proc.paragraphs == ()
+
+    def test_procedure_division_with_paragraph(self):
+        """A PROCEDURE DIVISION containing a named paragraph with statements.
+
+        COBOL example:
+            PROCEDURE DIVISION.
+            MAIN-PARA.
+                DISPLAY "HELLO".
+                STOP RUN.
+        """
+        para = ParagraphNode(
+            name="MAIN-PARA",
+            statements=[DisplayNode(operands=["HELLO"]), StopRunNode()],
+        )
+        proc = ProcedureDivisionNode(paragraphs=(para,))
+
+        assert len(proc.paragraphs) == 1
+        assert proc.paragraphs[0].name == "MAIN-PARA"
+        assert len(proc.paragraphs[0].statements) == 2
 
 
 class TestPicClause:
@@ -413,3 +439,154 @@ class TestDataItemNode:
         assert group.pic is None
         assert len(group.children) == 1
         assert group.children[0].level == 5
+
+
+class TestStatementNodes:
+    """Tests for PROCEDURE DIVISION statement AST nodes.
+
+    Each test constructs a statement node matching a real COBOL pattern
+    from the sample files, verifying both structure and semantics.
+    """
+
+    def test_display_with_mixed_operands(self):
+        """DISPLAY "ORDER-ID: " WS-ORDER-ID has two operands:
+        a string literal and a variable reference.
+        """
+        node = DisplayNode(operands=['"ORDER-ID: "', "WS-ORDER-ID"])
+
+        assert len(node.operands) == 2
+        assert node.operands[0] == '"ORDER-ID: "'
+        assert node.operands[1] == "WS-ORDER-ID"
+
+    def test_move_with_figurative_constant(self):
+        """MOVE ZEROS TO WS-QUANTITY — ZEROS is a COBOL figurative
+        constant that fills the target with zero values.
+        """
+        node = MoveNode(source="ZEROS", targets=["WS-QUANTITY"])
+
+        assert node.source == "ZEROS"
+        assert node.targets == ["WS-QUANTITY"]
+
+    def test_move_with_multiple_targets(self):
+        """MOVE 0 TO WS-A WS-B — MOVE can assign to multiple targets."""
+        node = MoveNode(source="0", targets=["WS-A", "WS-B"])
+
+        assert node.source == "0"
+        assert len(node.targets) == 2
+
+    def test_add_node(self):
+        """ADD 1000 TO WS-AMOUNT — adds a numeric value to a variable."""
+        node = AddNode(value="1000", target="WS-AMOUNT")
+
+        assert node.value == "1000"
+        assert node.target == "WS-AMOUNT"
+
+    def test_call_with_using_parameters(self):
+        """CALL "SAFE02-CALLED" USING WS-ORDER-ID WS-QUANTITY WS-RETURN-CODE
+        — three parameters passed by reference (default).
+        """
+        node = CallNode(
+            program_name="SAFE02-CALLED",
+            using_items=["WS-ORDER-ID", "WS-QUANTITY", "WS-RETURN-CODE"],
+        )
+
+        assert node.program_name == "SAFE02-CALLED"
+        assert len(node.using_items) == 3
+        assert node.using_items[0] == "WS-ORDER-ID"
+
+    def test_if_with_else_branch(self):
+        """IF SQLCODE = 0 ... ELSE ... END-IF — both branches
+        must be captured in the AST.
+        """
+        then_stmts = [MoveNode(source="WS-ORA-QUANTITY", targets=["LS-QUANTITY"])]
+        else_stmts = [MoveNode(source="0", targets=["LS-QUANTITY"])]
+
+        node = IfNode(
+            condition="SQLCODE = 0",
+            then_statements=then_stmts,
+            else_statements=else_stmts,
+        )
+
+        assert node.condition == "SQLCODE = 0"
+        assert len(node.then_statements) == 1
+        assert len(node.else_statements) == 1
+        # Verify nested statement types
+        assert isinstance(node.then_statements[0], MoveNode)
+        assert isinstance(node.else_statements[0], MoveNode)
+
+    def test_if_without_else(self):
+        """IF with no ELSE branch — else_statements is an empty list."""
+        node = IfNode(
+            condition="WS-STATUS = 'ACTIVE'",
+            then_statements=[DisplayNode(operands=["ACTIVE"])],
+            else_statements=[],
+        )
+
+        assert node.else_statements == []
+        assert len(node.then_statements) == 1
+
+    def test_stop_run_node(self):
+        """STOP RUN has no fields — it simply terminates the program."""
+        node = StopRunNode()
+        assert isinstance(node, StopRunNode)
+
+    def test_goback_node(self):
+        """GOBACK has no fields — it returns control to the caller."""
+        node = GobackNode()
+        assert isinstance(node, GobackNode)
+
+    def test_exec_sql_preserves_raw_sql_text(self):
+        """EXEC SQL SELECT QUANTITY INTO :WS-ORA-QUANTITY ... END-EXEC
+        — the SQL text between the delimiters is stored as-is,
+        including host variable references (:WS-ORA-QUANTITY).
+        """
+        sql = (
+            "SELECT QUANTITY INTO :WS-ORA-QUANTITY"
+            " FROM ORDERS WHERE ORDER_ID = :WS-ORA-ORDER-ID"
+        )
+        node = ExecSqlNode(sql_text=sql)
+
+        assert ":WS-ORA-QUANTITY" in node.sql_text
+        assert ":WS-ORA-ORDER-ID" in node.sql_text
+
+    def test_exec_sql_include(self):
+        """EXEC SQL INCLUDE SQLCA END-EXEC — this is a preprocessor
+        directive to include the SQLCA copybook. It appears as an
+        ExecSqlNode with sql_text='INCLUDE SQLCA'.
+        """
+        node = ExecSqlNode(sql_text="INCLUDE SQLCA")
+
+        assert node.sql_text == "INCLUDE SQLCA"
+
+
+class TestParagraphNode:
+    """Tests for ParagraphNode — named blocks of statements."""
+
+    def test_paragraph_with_statements(self):
+        """MAIN-PARA contains a sequence of statements.
+
+        COBOL example:
+            MAIN-PARA.
+                DISPLAY "ORDER-ID: " WS-ORDER-ID.
+                ADD 1000 TO WS-AMOUNT.
+                STOP RUN.
+        """
+        stmts = [
+            DisplayNode(operands=['"ORDER-ID: "', "WS-ORDER-ID"]),
+            AddNode(value="1000", target="WS-AMOUNT"),
+            StopRunNode(),
+        ]
+        para = ParagraphNode(name="MAIN-PARA", statements=stmts)
+
+        assert para.name == "MAIN-PARA"
+        assert len(para.statements) == 3
+        assert isinstance(para.statements[0], DisplayNode)
+        assert isinstance(para.statements[1], AddNode)
+        assert isinstance(para.statements[2], StopRunNode)
+
+    def test_empty_paragraph(self):
+        """A paragraph with no statements (edge case)."""
+        para = ParagraphNode(name="EMPTY-PARA", statements=[])
+
+        assert para.name == "EMPTY-PARA"
+        assert para.statements == []
