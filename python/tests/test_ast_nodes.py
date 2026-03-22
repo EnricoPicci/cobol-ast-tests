@@ -1,7 +1,8 @@
-"""Tests for AST node dataclasses — core program structure.
+"""Tests for AST node dataclasses — program structure and data items.
 
 These tests verify the typed dataclass hierarchy that represents a COBOL
-program's high-level structure: ProgramNode → divisions → sections.
+program's high-level structure (ProgramNode → divisions → sections) and
+data description entries (DataItemNode, PicClause, UsageType).
 
 Each test documents a COBOL structural concept alongside the Python
 dataclass that models it.
@@ -9,11 +10,14 @@ dataclass that models it.
 
 from cobol_ast.ast_nodes import (
     DataDivisionNode,
+    DataItemNode,
     EnvironmentDivisionNode,
     IdentificationDivisionNode,
     LinkageSectionNode,
+    PicClause,
     ProcedureDivisionNode,
     ProgramNode,
+    UsageType,
     WorkingStorageSectionNode,
 )
 
@@ -129,16 +133,12 @@ class TestDataDivisionSections:
         assert data_ls.linkage is not None
 
     def test_working_storage_items_default_empty(self):
-        """A freshly created WORKING-STORAGE SECTION has no items.
-        Items (DataItemNode) are added in Step 6.
-        """
+        """A freshly created WORKING-STORAGE SECTION has no items."""
         ws = WorkingStorageSectionNode()
         assert ws.items == ()
 
     def test_linkage_section_items_default_empty(self):
-        """A freshly created LINKAGE SECTION has no items.
-        Items (DataItemNode) are added in Step 6.
-        """
+        """A freshly created LINKAGE SECTION has no items."""
         ls = LinkageSectionNode()
         assert ls.items == ()
 
@@ -182,3 +182,234 @@ class TestProcedureDivision:
         """
         proc = ProcedureDivisionNode()
         assert proc.paragraphs == ()
+
+
+class TestPicClause:
+    """Tests for PicClause — the COBOL PIC (PICTURE) clause representation."""
+
+    def test_signed_numeric_pic(self):
+        """PIC S9(9) → signed=True, category='numeric', size=9
+
+        The 'S' prefix indicates a signed numeric field. The 9(9)
+        means 9 digits. This is the most common PIC for integer fields
+        used with COMP or COMP-3.
+        """
+        pic = PicClause(raw="S9(9)", category="numeric", size=9, signed=True)
+
+        assert pic.raw == "S9(9)"
+        assert pic.category == "numeric"
+        assert pic.size == 9
+        assert pic.signed is True
+
+    def test_unsigned_numeric_pic(self):
+        """PIC 9(5) → signed=False, category='numeric', size=5
+
+        No 'S' prefix means unsigned. Used for counters and other
+        non-negative values like WS-COUNTER in SAFE01.cob.
+        """
+        pic = PicClause(raw="9(5)", category="numeric", size=5, signed=False)
+
+        assert pic.raw == "9(5)"
+        assert pic.category == "numeric"
+        assert pic.size == 5
+        assert pic.signed is False
+
+    def test_alphanumeric_pic(self):
+        """PIC X(10) → signed=False, category='alphanumeric', size=10
+
+        PIC X defines an alphanumeric field — it can hold letters,
+        digits, or special characters. Used for string data like
+        WS-STATUS in SAFE01.cob.
+        """
+        pic = PicClause(raw="X(10)", category="alphanumeric", size=10, signed=False)
+
+        assert pic.raw == "X(10)"
+        assert pic.category == "alphanumeric"
+        assert pic.size == 10
+        assert pic.signed is False
+
+
+class TestDataItemNode:
+    """Tests for DataItemNode — COBOL data description entries.
+
+    Each test corresponds to a real data item from the sample COBOL files,
+    documenting both the COBOL semantics and the AST representation.
+    """
+
+    def test_comp_data_item_from_endian01(self):
+        """ENDIAN01.cob line: 01  WS-ORDER-ID  PIC S9(9) COMP VALUE 12345.
+
+        This is a level-01 binary integer. COMP under BINARY(BE) stores
+        the value in big-endian byte order. The AST must capture:
+        level=1, name='WS-ORDER-ID', pic.raw='S9(9)',
+        usage=COMP, value='12345'.
+        """
+        pic = PicClause(raw="S9(9)", category="numeric", size=9, signed=True)
+        node = DataItemNode(
+            level=1,
+            name="WS-ORDER-ID",
+            pic=pic,
+            usage=UsageType.COMP,
+            value="12345",
+            redefines=None,
+        )
+
+        assert node.level == 1
+        assert node.name == "WS-ORDER-ID"
+        assert node.pic is not None
+        assert node.pic.raw == "S9(9)"
+        assert node.usage == UsageType.COMP
+        assert node.value == "12345"
+        assert node.redefines is None
+        assert node.children == []
+
+    def test_comp3_data_item_from_safe01(self):
+        """SAFE01.cob line: 01  WS-ORDER-ID  PIC S9(9) COMP-3 VALUE 12345.
+
+        COMP-3 is packed decimal — each nibble stores a digit. It is
+        endianness-safe because there is no multi-byte integer to reverse.
+        """
+        pic = PicClause(raw="S9(9)", category="numeric", size=9, signed=True)
+        node = DataItemNode(
+            level=1,
+            name="WS-ORDER-ID",
+            pic=pic,
+            usage=UsageType.COMP_3,
+            value="12345",
+            redefines=None,
+        )
+
+        assert node.usage == UsageType.COMP_3
+        assert node.usage.value == "COMP-3"
+
+    def test_comp5_data_item_from_safe02_called(self):
+        """SAFE02-CALLED.cob line: 01  WS-ORA-ORDER-ID  PIC S9(9) COMP-5.
+
+        COMP-5 uses native byte order (little-endian on x86).
+        This is the correct type for Oracle host variables.
+        """
+        pic = PicClause(raw="S9(9)", category="numeric", size=9, signed=True)
+        node = DataItemNode(
+            level=1,
+            name="WS-ORA-ORDER-ID",
+            pic=pic,
+            usage=UsageType.COMP_5,
+            value=None,
+            redefines=None,
+        )
+
+        assert node.usage == UsageType.COMP_5
+        assert node.usage.value == "COMP-5"
+        assert node.value is None
+
+    def test_display_numeric_from_safe01(self):
+        """SAFE01.cob line: 01  WS-COUNTER  PIC 9(5) DISPLAY VALUE 98765.
+
+        DISPLAY stores each digit as a separate character byte.
+        Unsigned (no S in PIC), 5 digits.
+        """
+        pic = PicClause(raw="9(5)", category="numeric", size=5, signed=False)
+        node = DataItemNode(
+            level=1,
+            name="WS-COUNTER",
+            pic=pic,
+            usage=UsageType.DISPLAY,
+            value="98765",
+            redefines=None,
+        )
+
+        assert node.usage == UsageType.DISPLAY
+        assert node.pic is not None
+        assert node.pic.signed is False
+        assert node.value == "98765"
+
+    def test_alphanumeric_from_safe01(self):
+        """SAFE01.cob line: 01  WS-STATUS  PIC X(10) VALUE "ACTIVE".
+
+        PIC X = alphanumeric. 10 characters. VALUE is a string literal.
+        """
+        pic = PicClause(raw="X(10)", category="alphanumeric", size=10, signed=False)
+        node = DataItemNode(
+            level=1,
+            name="WS-STATUS",
+            pic=pic,
+            usage=None,
+            value="ACTIVE",
+            redefines=None,
+        )
+
+        assert node.pic is not None
+        assert node.pic.category == "alphanumeric"
+        assert node.value == "ACTIVE"
+        # No explicit USAGE means implicit DISPLAY
+        assert node.usage is None
+
+    def test_redefines_from_endian01(self):
+        """ENDIAN01.cob:
+            01  WS-ORDER-ID      PIC S9(9) COMP VALUE 12345.
+            01  WS-ORDER-BYTES   REDEFINES WS-ORDER-ID.
+                05  WS-BYTE-1    PIC X(1).
+                ...
+
+        REDEFINES overlays one data item on another's memory.
+        WS-ORDER-BYTES redefines WS-ORDER-ID — same memory, different
+        interpretation. The AST must capture the redefines target name
+        and the subordinate level-05 items as children.
+        """
+        # Build the four level-05 children
+        byte_children = [
+            DataItemNode(
+                level=5,
+                name=f"WS-BYTE-{i}",
+                pic=PicClause(raw="X(1)", category="alphanumeric", size=1, signed=False),
+                usage=None,
+                value=None,
+                redefines=None,
+            )
+            for i in range(1, 5)
+        ]
+
+        # The group item that redefines WS-ORDER-ID
+        node = DataItemNode(
+            level=1,
+            name="WS-ORDER-BYTES",
+            pic=None,  # Group items have no PIC
+            usage=None,
+            value=None,
+            redefines="WS-ORDER-ID",
+            children=byte_children,
+        )
+
+        assert node.redefines == "WS-ORDER-ID"
+        assert node.pic is None  # Group item
+        assert len(node.children) == 4
+        assert node.children[0].name == "WS-BYTE-1"
+        assert node.children[3].name == "WS-BYTE-4"
+
+    def test_group_item_has_children(self):
+        """A group item (level-01 with no PIC) contains subordinate
+        items. ENDIAN01's WS-ORDER-BYTES is a group with four
+        level-05 children.
+        """
+        child = DataItemNode(
+            level=5,
+            name="WS-BYTE-1",
+            pic=PicClause(raw="X(1)", category="alphanumeric", size=1, signed=False),
+            usage=None,
+            value=None,
+            redefines=None,
+        )
+        group = DataItemNode(
+            level=1,
+            name="WS-ORDER-BYTES",
+            pic=None,
+            usage=None,
+            value=None,
+            redefines="WS-ORDER-ID",
+            children=[child],
+        )
+
+        # Group items have no PIC — their structure is defined by children
+        assert group.pic is None
+        assert len(group.children) == 1
+        assert group.children[0].level == 5
