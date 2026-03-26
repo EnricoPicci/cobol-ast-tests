@@ -13,6 +13,7 @@ Demonstrate how AST parsers can analyze and transform COBOL source code. The pro
 | [ast-docs/intro-to-ast-parsers.md](ast-docs/intro-to-ast-parsers.md) | Introduction to AST parsers with a COBOL-focused walkthrough |
 | [python/ast-docs/parser-evaluation.md](python/ast-docs/parser-evaluation.md) | Evaluation of Python parsing library options for COBOL |
 | [python/ast-docs/implementation-plan.md](python/ast-docs/implementation-plan.md) | Detailed implementation plan for the ANTLR4-based Python parser |
+| [ast-docs/ast-for-endianness-oracle.md](ast-docs/ast-for-endianness-oracle.md) | How AST analysis can detect and fix endianness issues related to Oracle in COBOL migrations |
 
 ### COBOL Migration Context
 
