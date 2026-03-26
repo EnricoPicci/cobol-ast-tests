@@ -31,6 +31,24 @@ from enum import Enum
 from typing import Union
 
 
+@dataclass(frozen=True)
+class SourceLocation:
+    """Source position of an AST node in the original COBOL file.
+
+    Records the start and end positions (line and column) so that
+    downstream tools (error reporters, IDE integrations, code
+    highlighters) can map AST nodes back to the source text.
+
+    Lines are 1-based (matching editor conventions). Columns are
+    0-based (matching ANTLR4's convention).
+    """
+
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+
+
 class UsageType(Enum):
     """COBOL USAGE clause values.
 
@@ -62,6 +80,7 @@ class PicClause:
     category: str  # "numeric", "alphanumeric", "alphabetic"
     size: int  # Total size in character positions
     signed: bool  # True if PIC contains 'S'
+    location: SourceLocation | None = None
 
 
 @dataclass
@@ -88,6 +107,7 @@ class DataItemNode:
     value: str | None  # VALUE clause literal
     redefines: str | None  # Name of redefined item
     children: list[DataItemNode] = field(default_factory=list)
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +119,7 @@ class IdentificationDivisionNode:
     """
 
     program_id: str
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -108,7 +129,7 @@ class EnvironmentDivisionNode:
     In the sample files, this division is always present but empty.
     """
 
-    pass  # Extended in future steps if needed
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +141,7 @@ class WorkingStorageSectionNode:
     """
 
     items: tuple[DataItemNode, ...] = field(default_factory=tuple)
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +153,7 @@ class LinkageSectionNode:
     """
 
     items: tuple[DataItemNode, ...] = field(default_factory=tuple)
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +167,7 @@ class DataDivisionNode:
 
     working_storage: WorkingStorageSectionNode | None = None
     linkage: LinkageSectionNode | None = None
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +179,7 @@ class DisplayNode:
     """
 
     operands: list[str]  # String literals and/or data names
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +193,7 @@ class MoveNode:
 
     source: str  # Source value (literal, name, or figurative constant)
     targets: list[str]  # One or more target data names
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +205,7 @@ class AddNode:
 
     value: str
     target: str
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +217,7 @@ class CallNode:
 
     program_name: str
     using_items: list[str]
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -199,7 +227,7 @@ class StopRunNode:
     Used by main programs to end execution.
     """
 
-    pass
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -209,7 +237,7 @@ class GobackNode:
     Used by called subprograms instead of STOP RUN.
     """
 
-    pass
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +255,7 @@ class ExecSqlNode:
     """
 
     sql_text: str  # Raw SQL between EXEC SQL and END-EXEC
+    location: SourceLocation | None = None
 
 
 # StatementNode is a Union of all statement types. The visitor produces
@@ -258,6 +287,7 @@ class IfNode:
     condition: str  # Raw condition text
     then_statements: list[StatementNode]
     else_statements: list[StatementNode]
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -270,6 +300,7 @@ class ParagraphNode:
 
     name: str
     statements: list[StatementNode]
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -285,6 +316,7 @@ class ProcedureDivisionNode:
 
     using_items: tuple[str, ...] = field(default_factory=tuple)
     paragraphs: tuple[ParagraphNode, ...] = field(default_factory=tuple)
+    location: SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -307,3 +339,4 @@ class ProgramNode:
     environment: EnvironmentDivisionNode | None = None
     data: DataDivisionNode | None = None
     procedure: ProcedureDivisionNode | None = None
+    location: SourceLocation | None = None

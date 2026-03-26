@@ -56,6 +56,7 @@ from cobol_ast.ast_nodes import (
     PicClause,
     ProcedureDivisionNode,
     ProgramNode,
+    SourceLocation,
     StatementNode,
     StopRunNode,
     UsageType,
@@ -63,6 +64,30 @@ from cobol_ast.ast_nodes import (
 )
 from cobol_ast.generated.grammar.Cobol85Parser import Cobol85Parser
 from cobol_ast.generated.grammar.Cobol85Visitor import Cobol85Visitor
+
+
+def _location_from_ctx(ctx) -> SourceLocation | None:
+    """Extract a SourceLocation from an ANTLR4 ParserRuleContext.
+
+    Uses the context's ``start`` and ``stop`` tokens to determine the
+    line and column range. Returns ``None`` if token information is
+    unavailable (e.g., for synthetic or empty contexts).
+
+    Args:
+        ctx: An ANTLR4 ``ParserRuleContext`` with ``start`` and ``stop`` tokens.
+
+    Returns:
+        A ``SourceLocation`` with 1-based lines and 0-based columns,
+        or ``None`` if the context lacks token information.
+    """
+    if ctx is None or ctx.start is None or ctx.stop is None:
+        return None
+    return SourceLocation(
+        start_line=ctx.start.line,
+        start_column=ctx.start.column,
+        end_line=ctx.stop.line,
+        end_column=ctx.stop.column,
+    )
 
 
 class CobolAstVisitor(Cobol85Visitor):
@@ -147,6 +172,7 @@ class CobolAstVisitor(Cobol85Visitor):
             environment=env_node,
             data=data_node,
             procedure=proc_node,
+            location=_location_from_ctx(ctx),
         )
 
     def visitIdentificationDivision(
@@ -166,7 +192,10 @@ class CobolAstVisitor(Cobol85Visitor):
             An ``IdentificationDivisionNode`` containing the PROGRAM-ID.
         """
         program_id = self.visitProgramIdParagraph(ctx.programIdParagraph())
-        return IdentificationDivisionNode(program_id=program_id)
+        return IdentificationDivisionNode(
+            program_id=program_id,
+            location=_location_from_ctx(ctx),
+        )
 
     def visitProgramIdParagraph(
         self, ctx: Cobol85Parser.ProgramIdParagraphContext
@@ -203,7 +232,7 @@ class CobolAstVisitor(Cobol85Visitor):
         Returns:
             An ``EnvironmentDivisionNode`` instance.
         """
-        return EnvironmentDivisionNode()
+        return EnvironmentDivisionNode(location=_location_from_ctx(ctx))
 
     # -------------------------------------------------------------------
     # DATA DIVISION
@@ -240,6 +269,7 @@ class CobolAstVisitor(Cobol85Visitor):
         return DataDivisionNode(
             working_storage=working_storage,
             linkage=linkage,
+            location=_location_from_ctx(ctx),
         )
 
     def visitWorkingStorageSection(
@@ -258,7 +288,10 @@ class CobolAstVisitor(Cobol85Visitor):
         """
         flat_items = self._collect_data_items(ctx.dataDescriptionEntry())
         nested_items = _build_hierarchy(flat_items)
-        return WorkingStorageSectionNode(items=tuple(nested_items))
+        return WorkingStorageSectionNode(
+            items=tuple(nested_items),
+            location=_location_from_ctx(ctx),
+        )
 
     def visitLinkageSection(
         self, ctx: Cobol85Parser.LinkageSectionContext
@@ -276,7 +309,10 @@ class CobolAstVisitor(Cobol85Visitor):
         """
         flat_items = self._collect_data_items(ctx.dataDescriptionEntry())
         nested_items = _build_hierarchy(flat_items)
-        return LinkageSectionNode(items=tuple(nested_items))
+        return LinkageSectionNode(
+            items=tuple(nested_items),
+            location=_location_from_ctx(ctx),
+        )
 
     def _collect_data_items(
         self,
@@ -371,6 +407,7 @@ class CobolAstVisitor(Cobol85Visitor):
             usage=usage,
             value=value,
             redefines=redefines,
+            location=_location_from_ctx(ctx),
         )
 
     # -------------------------------------------------------------------
@@ -394,7 +431,7 @@ class CobolAstVisitor(Cobol85Visitor):
             A ``PicClause`` with the parsed attributes.
         """
         raw = ctx.pictureString().getText()
-        return _parse_pic_string(raw)
+        return _parse_pic_string(raw, location=_location_from_ctx(ctx))
 
     def _extract_usage(
         self, ctx: Cobol85Parser.DataUsageClauseContext
@@ -493,6 +530,7 @@ class CobolAstVisitor(Cobol85Visitor):
         return ProcedureDivisionNode(
             using_items=tuple(using_items),
             paragraphs=tuple(paragraphs),
+            location=_location_from_ctx(ctx),
         )
 
     def _extract_proc_using_items(
@@ -553,7 +591,11 @@ class CobolAstVisitor(Cobol85Visitor):
                 stmt = self._visit_statement(stmt_ctx)
                 if stmt is not None:
                     statements.append(stmt)
-        return ParagraphNode(name=name, statements=statements)
+        return ParagraphNode(
+            name=name,
+            statements=statements,
+            location=_location_from_ctx(ctx),
+        )
 
     def _visit_statement(
         self, ctx: Cobol85Parser.StatementContext
@@ -583,7 +625,7 @@ class CobolAstVisitor(Cobol85Visitor):
         if ctx.stopStatement():
             return self._visit_stop(ctx.stopStatement())
         if ctx.gobackStatement():
-            return GobackNode()
+            return GobackNode(location=_location_from_ctx(ctx.gobackStatement()))
         if ctx.execSqlStatement():
             return self._visit_exec_sql(ctx.execSqlStatement())
         return None
@@ -607,7 +649,7 @@ class CobolAstVisitor(Cobol85Visitor):
         operands: list[str] = []
         for op_ctx in ctx.displayOperand():
             operands.append(op_ctx.getText())
-        return DisplayNode(operands=operands)
+        return DisplayNode(operands=operands, location=_location_from_ctx(ctx))
 
     def _visit_move(self, ctx: Cobol85Parser.MoveStatementContext) -> MoveNode:
         """Extract source and targets from a MOVE statement.
@@ -631,9 +673,13 @@ class CobolAstVisitor(Cobol85Visitor):
         if move_to:
             source = move_to.moveToSendingArea().getText()
             targets = [ident.getText() for ident in move_to.identifier()]
-            return MoveNode(source=source, targets=targets)
+            return MoveNode(
+                source=source, targets=targets, location=_location_from_ctx(ctx)
+            )
         # MOVE CORRESPONDING is not used in the sample files.
-        return MoveNode(source=ctx.getText(), targets=[])
+        return MoveNode(
+            source=ctx.getText(), targets=[], location=_location_from_ctx(ctx)
+        )
 
     def _visit_add(self, ctx: Cobol85Parser.AddStatementContext) -> AddNode:
         """Extract value and target from an ADD statement.
@@ -655,9 +701,9 @@ class CobolAstVisitor(Cobol85Visitor):
             value = add_to.addFrom(0).getText()
             # addTo is the target variable receiving the sum.
             target = add_to.addTo(0).identifier().getText()
-            return AddNode(value=value, target=target)
+            return AddNode(value=value, target=target, location=_location_from_ctx(ctx))
         # ADD GIVING and ADD CORRESPONDING are not used in the samples.
-        return AddNode(value=ctx.getText(), target="")
+        return AddNode(value=ctx.getText(), target="", location=_location_from_ctx(ctx))
 
     def _visit_call(self, ctx: Cobol85Parser.CallStatementContext) -> CallNode:
         """Extract program name and USING items from a CALL statement.
@@ -700,7 +746,11 @@ class CobolAstVisitor(Cobol85Visitor):
                         if ident:
                             using_items.append(ident.getText())
 
-        return CallNode(program_name=program_name, using_items=using_items)
+        return CallNode(
+            program_name=program_name,
+            using_items=using_items,
+            location=_location_from_ctx(ctx),
+        )
 
     def _visit_if(self, ctx: Cobol85Parser.IfStatementContext) -> IfNode:
         """Extract condition and branches from an IF/ELSE/END-IF statement.
@@ -745,6 +795,7 @@ class CobolAstVisitor(Cobol85Visitor):
             condition=condition,
             then_statements=then_stmts,
             else_statements=else_stmts,
+            location=_location_from_ctx(ctx),
         )
 
     def _visit_stop(
@@ -765,7 +816,7 @@ class CobolAstVisitor(Cobol85Visitor):
             A ``StopRunNode`` for STOP RUN, or ``None`` for other forms.
         """
         if ctx.RUN():
-            return StopRunNode()
+            return StopRunNode(location=_location_from_ctx(ctx))
         return None
 
     def _visit_exec_sql(
@@ -801,7 +852,10 @@ class CobolAstVisitor(Cobol85Visitor):
         full_text = re.sub(r"^EXEC\s+SQL\s*", "", full_text, flags=re.IGNORECASE)
         # Remove the END-EXEC closing marker (with optional trailing period).
         full_text = re.sub(r"\s*END-EXEC\.?\s*$", "", full_text, flags=re.IGNORECASE)
-        return ExecSqlNode(sql_text=full_text.strip())
+        return ExecSqlNode(
+            sql_text=full_text.strip(),
+            location=_location_from_ctx(ctx),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +885,7 @@ def _get_original_text(ctx) -> str:
     return input_stream.getText(ctx.start.start, ctx.stop.stop)
 
 
-def _parse_pic_string(raw: str) -> PicClause:
+def _parse_pic_string(raw: str, location: SourceLocation | None = None) -> PicClause:
     """Parse a raw PIC string into a ``PicClause``.
 
     Examples:
@@ -846,6 +900,7 @@ def _parse_pic_string(raw: str) -> PicClause:
 
     Args:
         raw: The raw PIC string text (without the ``PIC`` keyword).
+        location: Optional source location of the PIC clause.
 
     Returns:
         A ``PicClause`` with category, size, and sign information.
@@ -866,7 +921,9 @@ def _parse_pic_string(raw: str) -> PicClause:
         count = int(match.group(1)) if match.group(1) else 1
         size += count
 
-    return PicClause(raw=raw, category=category, size=size, signed=signed)
+    return PicClause(
+        raw=raw, category=category, size=size, signed=signed, location=location
+    )
 
 
 def _build_hierarchy(flat_items: list[DataItemNode]) -> list[DataItemNode]:
